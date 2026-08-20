@@ -1,0 +1,20 @@
+[Unit]
+Description=Codex History Read-only Web
+After=network-online.target
+
+[Service]
+Type=simple
+User=codex-history
+Group=codex-history
+WorkingDirectory=/opt/codex-history
+EnvironmentFile=/etc/codex-history.env
+ExecStart=/usr/bin/python3 /opt/codex-history/app.py
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/opt/codex-history/data
+
+[Install]
+WantedBy=multi-user.target

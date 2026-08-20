@@ -1,0 +1,13 @@
+# 把 bridge.example.com 替换为最终分配给桥的子域名，再保存为 Caddyfile。
+bridge.example.com {
+    encode zstd gzip
+    reverse_proxy 127.0.0.1:8765
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "same-origin"
+        Permissions-Policy "camera=(), microphone=(), geolocation=()"
+        -Server
+    }
+}

@@ -1,0 +1,16 @@
+html,body{width:100%;height:100%;overflow:hidden}
+.shell{width:100vw;height:100vh;min-height:0}
+.sidebar,.conversation{height:100vh;min-height:0;overflow:hidden}
+.threads{flex:1;min-height:0;overflow-y:scroll;overflow-x:hidden;scrollbar-gutter:stable}
+.conversation-head{flex:0 0 77px;min-width:0}
+.conversation-title{min-width:0;overflow:hidden}
+.conversation-title h2,.conversation-title p{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.messages{flex:1;min-height:0;height:0;overflow-y:scroll;overflow-x:hidden;overscroll-behavior:contain;scrollbar-gutter:stable}
+.turn,.bubble,.commentary,.tool{max-width:100%;min-width:0}
+.bubble,.commentary,.tool pre{overflow-wrap:anywhere;word-break:break-word}
+.threads,.messages,.tool pre{scrollbar-width:auto;scrollbar-color:#596575 #15191f}
+.threads::-webkit-scrollbar,.messages::-webkit-scrollbar,.tool pre::-webkit-scrollbar{width:13px;height:13px}
+.threads::-webkit-scrollbar-track,.messages::-webkit-scrollbar-track,.tool pre::-webkit-scrollbar-track{background:#15191f;border-left:1px solid #262c34}
+.threads::-webkit-scrollbar-thumb,.messages::-webkit-scrollbar-thumb,.tool pre::-webkit-scrollbar-thumb{background:#596575;border:3px solid #15191f;border-radius:999px}
+.threads::-webkit-scrollbar-thumb:hover,.messages::-webkit-scrollbar-thumb:hover,.tool pre::-webkit-scrollbar-thumb:hover{background:#748195}
+@media(max-width:800px){.head-actions{gap:5px}.mode{max-width:190px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}

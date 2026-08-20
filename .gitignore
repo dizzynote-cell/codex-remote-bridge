@@ -1,0 +1,28 @@
+config/.env
+data/
+logs/
+node_modules/
+*.log
+__pycache__/
+*.pyc
+*.pem
+*.key
+*.pfx
+.DS_Store
+
+# Local runtimes and downloaded tools (install or discover them at setup time)
+tccli/
+vendor/
+schema/
+app/*.exe
+app/runtime-version.txt
+caddy/caddy.exe
+caddy/Caddyfile
+
+# Local/private deployment artifacts
+*.db
+*.db-wal
+*.db-shm
+cloud/uploads/
+release-private/
+cloud/.env.generated

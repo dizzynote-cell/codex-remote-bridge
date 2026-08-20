@@ -1,0 +1,6 @@
+.auth-gate{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;padding:24px;background:#0f1115;color:#f5f7fa}
+.auth-gate[hidden]{display:none}
+.auth-card{width:min(390px,100%);padding:36px 28px;text-align:center;border:1px solid #2b303a;border-radius:20px;background:#181b21;box-shadow:0 24px 70px #0008}
+.auth-logo{display:grid;place-items:center;width:52px;height:52px;margin:0 auto 20px;border-radius:14px;background:#356df3;font-size:24px;font-weight:700}
+.auth-card h2{margin:0 0 10px;font-size:21px}.auth-card p{margin:0;color:#aeb5c2;line-height:1.65}
+.auth-card button{margin-top:22px;padding:10px 18px;border:0;border-radius:10px;background:#356df3;color:white;font:inherit;cursor:pointer}

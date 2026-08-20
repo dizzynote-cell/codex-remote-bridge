@@ -1,0 +1,5 @@
+.head-actions{display:flex;align-items:center;gap:9px}
+.mode{border-radius:20px;padding:7px 12px;font-size:11px}
+.mode.desktop{color:#ffcb70;background:#332713;border:1px solid #674c20}
+.mode.mobile{color:#7de2ae;background:#123326;border:1px solid #285943}
+.mode.detecting{color:var(--muted);border:1px solid var(--line)}

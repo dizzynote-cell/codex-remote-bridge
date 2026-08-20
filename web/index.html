@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Codex Bridge</title>
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/mode.css">
+  <link rel="stylesheet" href="/scrollbars.css">
+  <link rel="stylesheet" href="/attachments.css">
+  <link rel="stylesheet" href="/projects.css">
+  <link rel="stylesheet" href="/thread-browser.css">
+  <link rel="stylesheet" href="/mobile.css">
+  <link rel="stylesheet" href="/feishu-auth.css">
+</head>
+<body>
+  <section id="auth-gate" class="auth-gate" hidden>
+    <div class="auth-card">
+      <div class="auth-logo">C</div>
+      <h2>正在验证飞书身份</h2>
+      <p id="auth-message">请在飞书客户端内打开此网页应用。</p>
+      <button id="auth-retry" hidden>重新验证</button>
+    </div>
+  </section>
+  <main class="shell">
+    <div id="sidebar-backdrop" class="sidebar-backdrop"></div>
+    <aside class="sidebar">
+      <header class="brand">
+        <div class="logo">C</div>
+        <div><h1>Codex Bridge</h1><p>PC 只读 · 飞书输入</p></div>
+      </header>
+      <label class="search"><span>⌕</span><input id="search" placeholder="搜索对话或项目"></label>
+      <div class="summary"><span id="count">0 个对话</span><button id="refresh">刷新</button></div>
+      <nav id="threads" class="threads"></nav>
+      <button id="load-more" class="load-more" hidden>查看更早对话</button>
+    </aside>
+    <section class="conversation">
+      <header class="conversation-head">
+        <button id="menu" class="menu-button" aria-label="打开对话列表">对话</button>
+        <div class="conversation-title"><h2 id="title">选择一个对话</h2><p id="meta">从左侧查看 Codex 历史</p></div>
+        <div class="head-actions"><div id="quota" class="quota"><span>额度</span><strong>读取中</strong><div><i></i></div></div><div id="mode" class="mode detecting">正在检测模式</div><div class="readonly">只读</div></div>
+      </header>
+      <div id="messages" class="messages">
+        <div class="empty"><div class="empty-icon">↖</div><h3>手机输入，电脑查看</h3><p>在飞书绑定对话并发送消息，这里只负责呈现完整上下文。</p></div>
+      </div>
+    </section>
+  </main>
+  <script src="https://lf-scm-cn.feishucdn.com/lark/op/h5-js-sdk-1.5.44.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>
