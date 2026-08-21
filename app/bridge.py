@@ -589,15 +589,45 @@ def execute_local_web_task(task_id: str, thread_id: str, text: str, files: list)
                         active_turn_id = candidate.get("id")
                         break
             if active_turn_id:
-                codex_rpc.call("turn/steer", {"threadId": thread_id, "expectedTurnId": active_turn_id, "input": codex_input})
-                set_local_web_task(task_id, status="completed", message="已作为补充引导追加", turnId=active_turn_id, steered=True)
-                return
+                try:
+                    codex_rpc.call("turn/steer", {"threadId": thread_id, "expectedTurnId": active_turn_id, "input": codex_input})
+                    set_local_web_task(task_id, status="completed", message="已作为补充引导追加", turnId=active_turn_id, steered=True)
+                    return
+                except RuntimeError:
+                    if active_turns.get(thread_id) == active_turn_id:
+                        active_turns.pop(thread_id, None)
+            before = read_thread(thread_id)
+            previous_turn_ids = {turn.get("id") for turn in before.get("turns", [])}
             codex_rpc.call("thread/resume", {"threadId": thread_id, "sandbox": "danger-full-access", "approvalPolicy": "never"})
             result = codex_rpc.call("turn/start", {"threadId": thread_id, "input": codex_input})
             turn_id = (result.get("turn") or {}).get("id")
             if turn_id:
                 active_turns[thread_id] = turn_id
         set_local_web_task(task_id, status="started", message="Codex 已开始处理", turnId=turn_id)
+        deadline = time.monotonic() + 1800
+        last_progress = ""
+        while time.monotonic() < deadline:
+            time.sleep(1)
+            thread = read_thread(thread_id)
+            target = next((item for item in reversed(thread.get("turns", [])) if item.get("id") == turn_id), None)
+            if target is None:
+                target = next((item for item in reversed(thread.get("turns", [])) if item.get("id") not in previous_turn_ids), None)
+            if not target:
+                continue
+            status = target.get("status")
+            status_name = status.get("type") if isinstance(status, dict) else status
+            progress = turn_progress_summary(target)
+            if progress and progress != last_progress:
+                set_local_web_task(task_id, status="running", message=f"Codex 正在处理\n\n{progress[:12000]}", turnId=turn_id)
+                last_progress = progress
+            if status_name in {"completed", "failed", "interrupted", "cancelled"}:
+                with codex_lock:
+                    if active_turns.get(thread_id) == turn_id:
+                        active_turns.pop(thread_id, None)
+                set_local_web_task(task_id, status="completed" if status_name == "completed" else "failed",
+                                   message="任务已完成" if status_name == "completed" else f"任务已结束：{status_name}", turnId=turn_id)
+                return
+        raise RuntimeError("Codex 执行超过30分钟")
     except Exception as error:
         log(f"本地网页任务失败 {task_id}: {error}")
         set_local_web_task(task_id, status="failed", message=str(error))
@@ -1206,12 +1236,7 @@ def process_message(message_id: str, chat_id: str, chat_type: str, text: str, co
         if not thread_id:
             send_to_codex(message_id, chat_id, text, codex_input)
             return
-        with thread_message_locks_guard:
-            message_lock = thread_message_locks.setdefault(thread_id, threading.Lock())
-        if message_lock.locked():
-            reply_text(message_id, "已收到补充内容，正在排队追加到当前任务。")
-        with message_lock:
-            send_to_codex(message_id, chat_id, text, codex_input)
+        send_to_codex(message_id, chat_id, text, codex_input)
     except Exception as error:
         log(f"处理飞书消息失败 {message_id}：{error}")
         try:
