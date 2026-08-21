@@ -12,6 +12,7 @@
   <link rel="stylesheet" href="/thread-browser.css">
   <link rel="stylesheet" href="/mobile.css">
   <link rel="stylesheet" href="/feishu-auth.css">
+  <link rel="stylesheet" href="/local-composer.css?v=20260821-1">
 </head>
 <body>
   <section id="auth-gate" class="auth-gate" hidden>
@@ -27,7 +28,7 @@
     <aside class="sidebar">
       <header class="brand">
         <div class="logo">C</div>
-        <div><h1>Codex Bridge</h1><p>PC 只读 · 飞书输入</p></div>
+        <div><h1>Codex Bridge</h1><p>本地网页与飞书均可输入</p></div>
       </header>
       <label class="search"><span>⌕</span><input id="search" placeholder="搜索对话或项目"></label>
       <div class="summary"><span id="count">0 个对话</span><button id="refresh">刷新</button></div>
@@ -38,14 +39,22 @@
       <header class="conversation-head">
         <button id="menu" class="menu-button" aria-label="打开对话列表">对话</button>
         <div class="conversation-title"><h2 id="title">选择一个对话</h2><p id="meta">从左侧查看 Codex 历史</p></div>
-        <div class="head-actions"><div id="quota" class="quota"><span>额度</span><strong>读取中</strong><div><i></i></div></div><div id="mode" class="mode detecting">正在检测模式</div><div class="readonly">只读</div></div>
+        <div class="head-actions"><div id="quota" class="quota"><span>额度</span><strong>读取中</strong><div><i></i></div></div><div id="mode" class="mode detecting">正在检测模式</div><div class="readonly">可输入</div></div>
       </header>
       <div id="messages" class="messages">
         <div class="empty"><div class="empty-icon">↖</div><h3>手机输入，电脑查看</h3><p>在飞书绑定对话并发送消息，这里只负责呈现完整上下文。</p></div>
       </div>
+      <section id="task-strip" class="task-strip" hidden></section>
+      <form id="composer" class="composer">
+        <label class="file-button" title="添加图片或轻量文件">＋<input id="files" type="file" multiple accept=".jpg,.jpeg,.png,.webp,.gif,.bmp,.pdf,.doc,.docx,.xls,.xlsx,.csv,.ppt,.pptx,.txt,.md"></label>
+        <textarea id="prompt" rows="1" aria-label="输入发送给 Codex 的内容"></textarea>
+        <button id="send" type="submit">发送</button>
+      </form>
+      <div id="file-list" class="file-list" hidden></div>
     </section>
   </main>
   <script src="https://lf-scm-cn.feishucdn.com/lark/op/h5-js-sdk-1.5.44.js"></script>
-  <script src="/app.js"></script>
+  <script src="/app.js?v=20260821-1"></script>
+  <script src="/local-composer.js?v=20260821-1"></script>
 </body>
 </html>

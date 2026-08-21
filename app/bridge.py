@@ -4,6 +4,7 @@
 # Repository: https://github.com/dizzynote-cell/codex-remote-bridge
 
 import json
+import base64
 import mimetypes
 import os
 import re
@@ -78,6 +79,8 @@ feishu_lock = threading.RLock()
 feishu_token = {"value": None, "expires_at": 0.0}
 web_sessions: dict[str, float] = {}
 web_sessions_lock = threading.RLock()
+local_web_tasks: dict[str, dict] = {}
+local_web_tasks_lock = threading.RLock()
 message_chat_ids: dict[str, str] = {}
 http = requests.Session()
 http.mount("https://", HTTPAdapter(max_retries=Retry(
@@ -413,6 +416,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/quota":
                 self.send_json(account_quota())
                 return
+            if parsed.path.startswith("/api/local-task/"):
+                task_id = parsed.path.removeprefix("/api/local-task/")
+                with local_web_tasks_lock:
+                    task = dict(local_web_tasks.get(task_id) or {})
+                self.send_json(task or {"error": "task_not_found"}, 200 if task else 404)
+                return
             if parsed.path in {"/api/attachment", "/api/open-attachment"}:
                 raw_path = parse_qs(parsed.query).get("path", [""])[0]
                 file_path = Path(raw_path).resolve()
@@ -515,6 +524,24 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.send_header("Set-Cookie", "bridge_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0")
                 self.end_headers()
                 return
+            if parsed.path == "/api/local-tasks":
+                if not self.is_local_request():
+                    self.send_json({"error": "local_only"}, 403)
+                    return
+                size = min(int(self.headers.get("Content-Length") or 0), 24 * 1024 * 1024)
+                payload = json.loads(self.rfile.read(size) or b"{}")
+                thread_id = str(payload.get("threadId") or "").strip()
+                text = str(payload.get("text") or "").strip()
+                if not thread_id or not text:
+                    self.send_json({"error": "missing_thread_or_text"}, 400)
+                    return
+                task_id = secrets.token_urlsafe(12)
+                with local_web_tasks_lock:
+                    local_web_tasks[task_id] = {"id": task_id, "status": "queued", "message": "已提交到本机桥"}
+                threading.Thread(target=execute_local_web_task,
+                                 args=(task_id, thread_id, text, payload.get("files") or []), daemon=True).start()
+                self.send_json({"taskId": task_id})
+                return
             self.send_error(404)
         except Exception as error:
             log(f"飞书网页认证失败：{error}")
@@ -522,6 +549,58 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def log_message(self, *_):
         return
+
+
+def set_local_web_task(task_id: str, **values) -> None:
+    with local_web_tasks_lock:
+        task = local_web_tasks.setdefault(task_id, {"id": task_id})
+        task.update(values)
+
+
+def execute_local_web_task(task_id: str, thread_id: str, text: str, files: list) -> None:
+    """Run a localhost UI request without requiring the cloud relay."""
+    try:
+        saved_files = []
+        day_dir = WEB_INBOX_DIR / datetime.now().strftime("%Y-%m-%d")
+        day_dir.mkdir(parents=True, exist_ok=True)
+        for item in files[:3]:
+            name = Path(str(item.get("name") or "attachment.bin")).name
+            raw = base64.b64decode(str(item.get("data") or ""), validate=True)
+            if len(raw) > 10 * 1024 * 1024:
+                raise RuntimeError("单个附件不能超过 10 MB")
+            target = day_dir / f"{secrets.token_hex(5)}-{name}"
+            target.write_bytes(raw)
+            saved_files.append(target)
+        if saved_files:
+            text += "\n\n我从本地网页上传了以下文件，请读取并处理：\n" + "\n".join(str(path) for path in saved_files)
+        codex_input = [{"type": "text", "text": text, "text_elements": []}]
+        for path in saved_files:
+            if path.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}:
+                codex_input.append({"type": "localImage", "path": str(path)})
+        set_local_web_task(task_id, status="running", message="Codex 正在处理")
+        with codex_lock:
+            active_turn_id = active_turns.get(thread_id)
+            if not active_turn_id:
+                snapshot = read_thread(thread_id)
+                for candidate in reversed(snapshot.get("turns", [])):
+                    status = candidate.get("status")
+                    status_name = status.get("type") if isinstance(status, dict) else status
+                    if status_name not in {"completed", "failed", "interrupted", "cancelled"}:
+                        active_turn_id = candidate.get("id")
+                        break
+            if active_turn_id:
+                codex_rpc.call("turn/steer", {"threadId": thread_id, "expectedTurnId": active_turn_id, "input": codex_input})
+                set_local_web_task(task_id, status="completed", message="已作为补充引导追加", turnId=active_turn_id, steered=True)
+                return
+            codex_rpc.call("thread/resume", {"threadId": thread_id, "sandbox": "danger-full-access", "approvalPolicy": "never"})
+            result = codex_rpc.call("turn/start", {"threadId": thread_id, "input": codex_input})
+            turn_id = (result.get("turn") or {}).get("id")
+            if turn_id:
+                active_turns[thread_id] = turn_id
+        set_local_web_task(task_id, status="started", message="Codex 已开始处理", turnId=turn_id)
+    except Exception as error:
+        log(f"本地网页任务失败 {task_id}: {error}")
+        set_local_web_task(task_id, status="failed", message=str(error))
 
 
 def start_dashboard():
