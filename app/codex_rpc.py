@@ -36,7 +36,7 @@ class CodexRpc:
             "clientInfo": {
                 "name": "codex-feishu-bridge",
                 "title": "Codex Feishu Bridge",
-                "version": "0.1.0",
+                "version": "0.2.0",
             },
             "capabilities": {"experimentalApi": True},
         })
