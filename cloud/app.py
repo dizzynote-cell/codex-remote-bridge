@@ -19,6 +19,9 @@ db=sqlite3.connect(DB,check_same_thread=False)
 db.execute('PRAGMA journal_mode=WAL'); db.execute('PRAGMA busy_timeout=5000')
 db.executescript('''CREATE TABLE IF NOT EXISTS threads(id TEXT PRIMARY KEY,name TEXT,cwd TEXT,status TEXT,preview TEXT,updated_at TEXT,payload TEXT NOT NULL,content_hash TEXT NOT NULL,synced_at INTEGER NOT NULL);CREATE INDEX IF NOT EXISTS idx_threads_synced_at ON threads(synced_at DESC);CREATE TABLE IF NOT EXISTS hidden_threads(thread_id TEXT PRIMARY KEY,hidden_at INTEGER NOT NULL);CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);CREATE TABLE IF NOT EXISTS tasks(id TEXT PRIMARY KEY,op TEXT NOT NULL,thread_id TEXT,title TEXT,cwd TEXT,text TEXT,source TEXT NOT NULL,status TEXT NOT NULL,created_at INTEGER NOT NULL,claimed_at INTEGER,updated_at INTEGER NOT NULL,result TEXT,error TEXT);CREATE INDEX IF NOT EXISTS idx_tasks_status_created ON tasks(status,created_at);CREATE TABLE IF NOT EXISTS task_events(id INTEGER PRIMARY KEY AUTOINCREMENT,task_id TEXT NOT NULL,kind TEXT NOT NULL,payload TEXT NOT NULL,created_at INTEGER NOT NULL);CREATE INDEX IF NOT EXISTS idx_task_events_task ON task_events(task_id,id);CREATE TABLE IF NOT EXISTS task_files(id TEXT PRIMARY KEY,task_id TEXT NOT NULL,name TEXT NOT NULL,mime TEXT,size INTEGER NOT NULL,path TEXT NOT NULL,created_at INTEGER NOT NULL);CREATE INDEX IF NOT EXISTS idx_task_files_task ON task_files(task_id);'''); db.commit()
 ALLOWED_UPLOAD_EXT={'.jpg','.jpeg','.png','.webp','.gif','.bmp','.pdf','.doc','.docx','.xls','.xlsx','.csv','.ppt','.pptx','.txt','.md'}
+def valid_thread_id(value):
+    try: uuid.UUID(str(value).removeprefix('urn:uuid:')); return True
+    except (ValueError,AttributeError,TypeError): return False
 
 def post_json(url,payload,headers=None):
     req=Request(url,data=json.dumps(payload).encode(),headers={'Content-Type':'application/json',**(headers or {})},method='POST')
@@ -151,6 +154,7 @@ class H(BaseHTTPRequestHandler):
             if not self.authed():return self.json({'error':'feishu_login_required'},401)
             data=json.loads(body or b'{}'); op=str(data.get('op') or 'message'); thread_id=str(data.get('threadId') or '').strip(); text=str(data.get('text') or '').strip(); title=str(data.get('title') or '').strip(); cwd=str(data.get('cwd') or '').strip()
             if op=='message' and (not thread_id or not text):return self.json({'error':'missing_thread_or_text'},400)
+            if op=='message' and not valid_thread_id(thread_id):return self.json({'error':'invalid_thread_id','message':'所选条目不是有效的 Codex 对话，请刷新后重新选择'},400)
             if op=='new_thread' and (not title or not cwd):return self.json({'error':'missing_title_or_cwd'},400)
             incoming=data.get('files') or []
             if len(incoming)>3:return self.json({'error':'too_many_files'},400)

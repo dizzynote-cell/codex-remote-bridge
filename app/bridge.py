@@ -13,6 +13,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 from http.cookies import SimpleCookie
@@ -55,6 +56,14 @@ def log(message: str) -> None:
     print(line, flush=True)
     with (LOG_DIR / "bridge.log").open("a", encoding="utf-8") as file:
         file.write(line + "\n")
+
+
+def is_valid_thread_id(value: str) -> bool:
+    try:
+        uuid.UUID(str(value).removeprefix("urn:uuid:"))
+        return True
+    except (ValueError, AttributeError, TypeError):
+        return False
 
 
 def load_state() -> dict:
@@ -560,6 +569,8 @@ def set_local_web_task(task_id: str, **values) -> None:
 def execute_local_web_task(task_id: str, thread_id: str, text: str, files: list) -> None:
     """Run a localhost UI request without requiring the cloud relay."""
     try:
+        if not is_valid_thread_id(thread_id):
+            raise RuntimeError("所选条目不是有效的 Codex 对话，请刷新列表后重新选择")
         saved_files = []
         day_dir = WEB_INBOX_DIR / datetime.now().strftime("%Y-%m-%d")
         day_dir.mkdir(parents=True, exist_ok=True)
@@ -781,6 +792,8 @@ def execute_cloud_task(task: dict) -> None:
         text = (task.get("text") or "").strip()
         if not thread_id or not text:
             raise RuntimeError("网页任务缺少对话或文字")
+        if not is_valid_thread_id(thread_id):
+            raise RuntimeError("所选条目不是有效的 Codex 对话，请刷新列表后重新选择")
         local_files = download_cloud_task_files(task)
         if local_files:
             text += "\n\n我从网页端上传了以下本机临时文件，请读取并处理：\n" + "\n".join(str(path) for path in local_files)
