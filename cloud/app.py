@@ -3,7 +3,7 @@
 # Project: Codex Remote Bridge
 # Repository: https://github.com/dizzynote-cell/codex-remote-bridge
 
-import base64, binascii, hashlib, json, os, secrets, sqlite3, time, uuid
+import base64, binascii, hashlib, json, os, re, secrets, shutil, sqlite3, time, uuid
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -18,6 +18,7 @@ DB.parent.mkdir(parents=True,exist_ok=True); UPLOADS.mkdir(parents=True,exist_ok
 db=sqlite3.connect(DB,check_same_thread=False)
 db.execute('PRAGMA journal_mode=WAL'); db.execute('PRAGMA busy_timeout=5000')
 db.executescript('''CREATE TABLE IF NOT EXISTS threads(id TEXT PRIMARY KEY,name TEXT,cwd TEXT,status TEXT,preview TEXT,updated_at TEXT,payload TEXT NOT NULL,content_hash TEXT NOT NULL,synced_at INTEGER NOT NULL);CREATE INDEX IF NOT EXISTS idx_threads_synced_at ON threads(synced_at DESC);CREATE TABLE IF NOT EXISTS hidden_threads(thread_id TEXT PRIMARY KEY,hidden_at INTEGER NOT NULL);CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);CREATE TABLE IF NOT EXISTS tasks(id TEXT PRIMARY KEY,op TEXT NOT NULL,thread_id TEXT,title TEXT,cwd TEXT,text TEXT,source TEXT NOT NULL,status TEXT NOT NULL,created_at INTEGER NOT NULL,claimed_at INTEGER,updated_at INTEGER NOT NULL,result TEXT,error TEXT);CREATE INDEX IF NOT EXISTS idx_tasks_status_created ON tasks(status,created_at);CREATE TABLE IF NOT EXISTS task_events(id INTEGER PRIMARY KEY AUTOINCREMENT,task_id TEXT NOT NULL,kind TEXT NOT NULL,payload TEXT NOT NULL,created_at INTEGER NOT NULL);CREATE INDEX IF NOT EXISTS idx_task_events_task ON task_events(task_id,id);CREATE TABLE IF NOT EXISTS task_files(id TEXT PRIMARY KEY,task_id TEXT NOT NULL,name TEXT NOT NULL,mime TEXT,size INTEGER NOT NULL,path TEXT NOT NULL,created_at INTEGER NOT NULL);CREATE INDEX IF NOT EXISTS idx_task_files_task ON task_files(task_id);'''); db.commit()
+db.execute('CREATE TABLE IF NOT EXISTS output_files(id TEXT PRIMARY KEY,name TEXT NOT NULL,mime TEXT,size INTEGER NOT NULL,path TEXT NOT NULL,created_at INTEGER NOT NULL,expires_at INTEGER NOT NULL)');db.commit()
 ALLOWED_UPLOAD_EXT={'.jpg','.jpeg','.png','.webp','.gif','.bmp','.pdf','.doc','.docx','.xls','.xlsx','.csv','.ppt','.pptx','.txt','.md'}
 def valid_thread_id(value):
     try: uuid.UUID(str(value).removeprefix('urn:uuid:')); return True
@@ -83,6 +84,15 @@ class H(BaseHTTPRequestHandler):
             if not changed:return self.json({'task':None})
             task=dict(zip(('id','op','threadId','title','cwd','text','source','createdAt'),row)); files=db.execute('SELECT id,name,mime,size FROM task_files WHERE task_id=? ORDER BY created_at',(row[0],)).fetchall(); task['files']=[dict(zip(('id','name','mime','size'),f)) for f in files]
             return self.json({'task':task})
+        if p.path=='/api/device/storage':
+            if not secrets.compare_digest(self.headers.get('Authorization') or '',f'Bearer {SYNC_TOKEN}'):return self.json({'error':'unauthorized'},401)
+            now=int(time.time())
+            for row in db.execute('SELECT id,path FROM output_files WHERE expires_at<?',(now,)).fetchall():
+                try:Path(row[1]).unlink(missing_ok=True)
+                except OSError:pass
+                db.execute('DELETE FROM output_files WHERE id=?',(row[0],))
+            db.commit();usage=shutil.disk_usage(DB.parent);stored=db.execute('SELECT COALESCE(SUM(size),0) FROM output_files').fetchone()[0];available=usage.free>=2*1024**3 and usage.free/usage.total>=.10 and stored<5*1024**3
+            return self.json({'available':available,'freeBytes':usage.free,'totalBytes':usage.total,'storedBytes':stored,'message':'' if available else '云端可用存储不足或已接近安全线'})
         if p.path.startswith('/api/device/files/'):
             if not secrets.compare_digest(self.headers.get('Authorization') or '',f'Bearer {SYNC_TOKEN}'):return self.json({'error':'unauthorized'},401)
             file_id=unquote(p.path.split('/api/device/files/',1)[1]); row=db.execute('SELECT name,mime,size,path FROM task_files WHERE id=?',(file_id,)).fetchone()
@@ -91,6 +101,10 @@ class H(BaseHTTPRequestHandler):
             if not f.is_file():return self.send_error(404)
             b=f.read_bytes(); self.send_response(200); self.send_header('Content-Type',row[1] or 'application/octet-stream'); self.send_header('Content-Length',str(len(b))); self.send_header('X-File-Name',quote(row[0])); self.end_headers(); self.wfile.write(b); return
         if p.path.startswith('/api/') and not self.authed():return self.json({'error':'feishu_login_required'},401)
+        if p.path.startswith('/api/output-files/'):
+            file_id=unquote(p.path.split('/api/output-files/',1)[1]);row=db.execute('SELECT name,mime,size,path,expires_at FROM output_files WHERE id=?',(file_id,)).fetchone()
+            if not row or row[4]<int(time.time()) or not Path(row[3]).is_file():return self.send_error(404)
+            b=Path(row[3]).read_bytes();self.send_response(200);self.send_header('Content-Type',row[1]);self.send_header('Content-Length',str(len(b)));self.send_header('Content-Disposition',f"inline; filename*=UTF-8''{quote(row[0])}");self.end_headers();self.wfile.write(b);return
         if p.path=='/api/tasks':
             q=parse_qs(p.query); after=int((q.get('after') or ['0'])[0] or 0)
             rows=db.execute("SELECT id,op,thread_id,title,cwd,text,source,status,created_at,updated_at,result,error FROM tasks WHERE updated_at>=? ORDER BY created_at DESC LIMIT 50",(after,)).fetchall()
@@ -120,6 +134,14 @@ class H(BaseHTTPRequestHandler):
         b=f.read_bytes(); ct={'.html':'text/html','.js':'application/javascript','.css':'text/css'}.get(f.suffix,'application/octet-stream'); self.send_response(200); self.send_header('Content-Type',ct+'; charset=utf-8'); self.send_header('Cache-Control','no-cache, no-store, must-revalidate'); self.send_header('Pragma','no-cache'); self.send_header('Expires','0'); self.send_header('Content-Length',str(len(b))); self.end_headers(); self.wfile.write(b)
     def do_POST(self):
         p=urlparse(self.path); n=min(int(self.headers.get('Content-Length') or 0),24*1024*1024); body=self.rfile.read(n)
+        if p.path.startswith('/api/device/output-files/'):
+            if not secrets.compare_digest(self.headers.get('Authorization') or '',f'Bearer {SYNC_TOKEN}'):return self.json({'error':'unauthorized'},401)
+            file_id=unquote(p.path.split('/api/device/output-files/',1)[1]);name=unquote(self.headers.get('X-File-Name') or 'file');mime=self.headers.get('X-File-Mime') or 'application/octet-stream'
+            if not re.fullmatch(r'[0-9a-f]{32}',file_id):return self.json({'error':'invalid_file_id'},400)
+            if len(body)<=0 or len(body)>10*1024*1024:return self.json({'error':'file_too_large'},400)
+            usage=shutil.disk_usage(DB.parent);stored=db.execute('SELECT COALESCE(SUM(size),0) FROM output_files').fetchone()[0]
+            if usage.free-len(body)<2*1024**3 or usage.free/usage.total<.10 or stored+len(body)>5*1024**3:return self.json({'error':'storage_low','message':'云端可用存储不足'},507)
+            path=UPLOADS/f'output-{file_id}{Path(name).suffix.lower()}';path.write_bytes(body);now=int(time.time());db.execute('INSERT OR REPLACE INTO output_files VALUES(?,?,?,?,?,?,?)',(file_id,Path(name).name,mime,len(body),str(path),now,now+7*86400));db.commit();return self.json({'ok':True,'fileId':file_id,'expiresAt':now+7*86400})
         if p.path=='/api/sync':
             if not secrets.compare_digest(self.headers.get('Authorization') or '',f'Bearer {SYNC_TOKEN}'):return self.json({'error':'unauthorized'},401)
             data=json.loads(body); now=int(time.time())

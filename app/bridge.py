@@ -9,6 +9,7 @@ import mimetypes
 import os
 import re
 import secrets
+import shutil
 import subprocess
 import sys
 import threading
@@ -258,32 +259,137 @@ AUTO_UPLOAD_SUFFIXES = IMAGE_SUFFIXES | {
     ".ppt", ".pptx", ".pptm", ".pps", ".ppsx",
 }
 WINDOWS_PATH_RE = re.compile(r"(?i)(?:[A-Z]:\\[^\r\n<>\"|?*]+)")
+DIRECT_FILE_LIMIT = 10 * 1024 * 1024
+DIRECT_BATCH_LIMIT = 30 * 1024 * 1024
 
 
-def existing_attachments(turn: dict) -> list[Path]:
-    paths: list[Path] = []
+def existing_attachments(turn: dict) -> tuple[list[Path], list[Path]]:
+    displayable: list[Path] = []
+    referenced: list[Path] = []
     for item in turn.get("items", []):
         for raw in WINDOWS_PATH_RE.findall(item_text(item)):
             candidate = Path(raw.rstrip(" .,:;，。；：）)]}"))
             if candidate.is_file():
-                paths.append(candidate)
+                referenced.append(candidate)
         if item.get("type") == "fileChange":
             for change in item.get("changes", []):
                 raw = change.get("path")
                 if raw:
                     candidate = Path(raw)
-                    if candidate.is_file():
-                        paths.append(candidate)
-    unique, seen_paths = [], set()
+                    if candidate.is_file() and candidate.suffix.lower() in AUTO_UPLOAD_SUFFIXES:
+                        displayable.append(candidate)
+    displayable.extend(path for path in referenced if path.suffix.lower() in AUTO_UPLOAD_SUFFIXES)
+
+    def unique_paths(paths: list[Path]) -> list[Path]:
+        unique, seen_paths = [], set()
+        for path in paths:
+            resolved = path.resolve()
+            key = str(resolved).lower()
+            if key not in seen_paths:
+                seen_paths.add(key)
+                unique.append(resolved)
+        return unique[:10]
+
+    displayable_paths = unique_paths(displayable)
+    displayable_keys = {str(path).lower() for path in displayable_paths}
+    local_only_paths = [path for path in unique_paths(referenced) if str(path).lower() not in displayable_keys]
+    return displayable_paths, local_only_paths
+
+
+def agent_disk_dir() -> Path | None:
+    raw = (os.getenv("CODEX_LARGE_FILE_DIR") or "").strip()
+    return Path(raw).resolve() if raw else None
+
+
+def copy_batch_to_agent_disk(paths: list[Path], turn_id: str) -> dict[str, Path]:
+    root = agent_disk_dir()
+    if not root:
+        return {}
+    folder = root / "Codex Outputs" / datetime.now().strftime("%Y-%m-%d") / (turn_id[-8:] or secrets.token_hex(4))
+    folder.mkdir(parents=True, exist_ok=True)
+    copied = {}
+    for source in paths:
+        target = folder / source.name
+        if target.exists() and target.stat().st_size != source.stat().st_size:
+            target = folder / f"{source.stem}-{secrets.token_hex(3)}{source.suffix}"
+        if source.resolve() != target.resolve() and not target.exists():
+            shutil.copy2(source, target)
+        copied[str(source.resolve()).lower()] = target
+    return copied
+
+
+def cloud_storage_available(required: int) -> tuple[bool, str]:
+    base = cloud_base_url()
+    token = (os.getenv("CODEX_HISTORY_SYNC_TOKEN") or "").strip()
+    if not base or not token:
+        return False, "未配置公网附件服务"
+    try:
+        response = http.get(f"{base}/api/device/storage", headers={"Authorization": f"Bearer {token}"}, timeout=(10, 30))
+        response.raise_for_status()
+        data = response.json()
+        return bool(data.get("available") and int(data.get("freeBytes") or 0) - required >= 2 * 1024 ** 3), str(data.get("message") or "")
+    except Exception as error:
+        return False, f"云端存储检查失败：{error}"
+
+
+def upload_cloud_output(path: Path) -> str:
+    base = cloud_base_url()
+    token = (os.getenv("CODEX_HISTORY_SYNC_TOKEN") or "").strip()
+    stamp = f"{path.resolve()}|{path.stat().st_mtime_ns}|{path.stat().st_size}".encode("utf-8")
+    file_id = __import__("hashlib").sha256(stamp).hexdigest()[:32]
+    response = http.post(f"{base}/api/device/output-files/{file_id}",
+        headers={"Authorization": f"Bearer {token}", "X-File-Name": requests.utils.quote(path.name),
+                 "X-File-Mime": mimetypes.guess_type(path.name)[0] or "application/octet-stream"},
+        data=path.read_bytes(), timeout=(10, 120))
+    response.raise_for_status()
+    return file_id
+
+
+def attachment_plan(turn: dict, upload_cloud: bool = False) -> list[dict]:
+    paths, local_only_paths = existing_attachments(turn)
+    local_only = [{"name": path.name, "size": path.stat().st_size,
+                   "mime": mimetypes.guess_type(path.name)[0] or "application/octet-stream",
+                   "localPath": str(path), "delivery": "local_only",
+                   "reason": "该文件类型不直接上传；文件保存在本机"}
+                  for path in local_only_paths]
+    if not paths:
+        return local_only
+    total = sum(path.stat().st_size for path in paths)
+    fallback = any(path.stat().st_size > DIRECT_FILE_LIMIT for path in paths) or total > DIRECT_BATCH_LIMIT
+    reason = "单文件超过10 MB" if any(path.stat().st_size > DIRECT_FILE_LIMIT for path in paths) else "单次回复附件合计超过30 MB"
+    if upload_cloud and not fallback:
+        available, storage_message = cloud_storage_available(total)
+        if not available:
+            fallback, reason = True, storage_message or "云端可用空间不足"
+    if upload_cloud and not fallback:
+        try:
+            cloud_ids = {str(path).lower(): upload_cloud_output(path) for path in paths}
+        except Exception as error:
+            fallback, reason = True, f"云端附件上传失败：{error}"
+            cloud_ids = {}
+    else:
+        cloud_ids = {}
+    copied = copy_batch_to_agent_disk(paths, str(turn.get("id") or "output")) if fallback else {}
+    result = []
     for path in paths:
-        resolved = path.resolve()
-        if resolved.suffix.lower() not in AUTO_UPLOAD_SUFFIXES:
-            continue
-        key = str(resolved).lower()
-        if key not in seen_paths:
-            seen_paths.add(key)
-            unique.append(resolved)
-    return unique[:10]
+        item = {"name": path.name, "size": path.stat().st_size, "mime": mimetypes.guess_type(path.name)[0] or "application/octet-stream",
+                "localPath": str(path), "delivery": "local", "reason": "文件保存在本机"}
+        if fallback:
+            target = copied.get(str(path.resolve()).lower())
+            item.update({"delivery": "agent_disk" if target else "local_fallback", "agentDiskPath": str(target) if target else None,
+                         "reason": reason if target else f"{reason}；未配置 Agent Disk"})
+        elif upload_cloud:
+            item.update({"delivery": "cloud", "cloudFileId": cloud_ids[str(path).lower()], "reason": "点击查看或下载"})
+        else:
+            item.update({"delivery": "local", "reason": "点击查看或下载"})
+        result.append(item)
+    return result + local_only
+
+
+def enrich_thread_attachments(thread: dict, upload_cloud: bool = False) -> dict:
+    for turn in thread.get("turns", []):
+        turn["bridgeAttachments"] = attachment_plan(turn, upload_cloud)
+    return thread
 
 
 def upload_feishu_attachment(path: Path) -> tuple[str, dict]:
@@ -452,7 +558,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             if parsed.path.startswith("/api/thread/"):
                 thread_id = parsed.path.removeprefix("/api/thread/")
-                thread = read_thread(thread_id)
+                thread = enrich_thread_attachments(read_thread(thread_id), False)
                 self.send_json({"thread": thread})
                 return
             if parsed.path in {"/", "/index.html"}:
@@ -671,7 +777,7 @@ def sync_cloud_history() -> None:
                 thread_id = summary.get("id")
                 if not thread_id:
                     continue
-                thread = read_thread(thread_id)
+                thread = enrich_thread_attachments(read_thread(thread_id), True)
                 raw = json.dumps(thread, ensure_ascii=False, sort_keys=True, default=str)
                 digest = __import__("hashlib").sha256(raw.encode("utf-8")).hexdigest()
                 if last_hashes.get(thread_id) != digest:
@@ -1227,13 +1333,28 @@ def send_to_codex(message_id: str, chat_id: str, text: str, codex_input: list | 
             if not agent_text:
                 agent_text = f"任务状态：{status}，没有取得文字回复。"
             reply_text(message_id, f"Codex 回复：\n\n{agent_text[:12000]}")
-            for attachment in existing_attachments(target):
-                try:
-                    msg_type, content = upload_feishu_attachment(attachment)
-                    reply_message(message_id, msg_type, content)
-                except Exception as attachment_error:
-                    log(f"附件回传失败 {attachment}: {attachment_error}")
-                    reply_text(message_id, f"附件 {attachment.name} 未能发送到飞书：{attachment_error}\n可在电脑网页版中点击打开。")
+            plan = attachment_plan(target, False)
+            agent_items = [item for item in plan if item["delivery"] == "agent_disk"]
+            local_only_items = [item for item in plan if item["delivery"] == "local_only"]
+            local_fallback_items = [item for item in plan if item["delivery"] == "local_fallback"]
+            if agent_items:
+                lines = [f"{item['name']}\nAgent Disk：{item.get('agentDiskPath') or '未配置'}\n原因：{item['reason']}" for item in agent_items]
+                reply_text(message_id, "本次回复附件统一保存到 Agent Disk：\n\n" + "\n\n".join(lines))
+            else:
+                for item in (item for item in plan if item["delivery"] == "local"):
+                    attachment = Path(item["localPath"])
+                    try:
+                        msg_type, content = upload_feishu_attachment(attachment)
+                        reply_message(message_id, msg_type, content)
+                    except Exception as attachment_error:
+                        log(f"附件回传失败 {attachment}: {attachment_error}")
+                        reply_text(message_id, f"附件 {attachment.name} 未能发送到飞书：{attachment_error}\n本机位置：{attachment}")
+            if local_only_items:
+                reply_text(message_id, "以下文件类型不直接上传，已保存在本机：\n" + "\n".join(
+                    f"{item['name']}：{item['localPath']}" for item in local_only_items))
+            if local_fallback_items:
+                reply_text(message_id, "附件超过直传限制，但尚未配置 Agent Disk；文件仍保存在本机：\n" + "\n".join(
+                    f"{item['name']}：{item['localPath']}" for item in local_fallback_items))
             return
     with codex_lock:
         if active_turns.get(thread_id) == turn_id:
