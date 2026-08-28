@@ -24,6 +24,22 @@
     </div>
   </section>
   <main class="shell">
+    <dialog id="new-thread-dialog" class="new-thread-dialog">
+      <form id="new-thread-form" method="dialog">
+        <header><strong>新建对话</strong><button id="close-new-thread" type="button">×</button></header>
+        <div class="new-thread-kinds">
+          <label><input type="radio" name="thread-kind" value="existing" checked> 现有项目</label>
+          <label><input type="radio" name="thread-kind" value="project"> 新建项目</label>
+          <label><input type="radio" name="thread-kind" value="standalone"> 独立会话</label>
+        </div>
+        <label id="existing-project-row">项目<select id="new-thread-project"></select></label>
+        <label id="new-project-row" hidden>项目名称<input id="new-project-name" maxlength="80" placeholder="例如：销售模型"></label>
+        <label>对话名称<input id="new-thread-title" maxlength="100" required></label>
+        <label>第一条消息<textarea id="new-thread-text" rows="4" required placeholder="输入这个对话要开始处理的内容"></textarea></label>
+        <p id="new-thread-location" class="new-thread-location"></p>
+        <footer><button id="cancel-new-thread" type="button">取消</button><button type="submit" class="primary">创建并发送</button></footer>
+      </form>
+    </dialog>
     <div id="sidebar-backdrop" class="sidebar-backdrop"></div>
     <aside class="sidebar">
       <header class="brand">
@@ -31,7 +47,7 @@
         <div><h1>Codex Bridge</h1><p>本地网页与飞书均可输入</p></div>
       </header>
       <label class="search"><span>⌕</span><input id="search" placeholder="搜索对话或项目"></label>
-      <div class="summary"><span id="count">0 个对话</span><button id="refresh">刷新</button></div>
+      <div class="summary"><span id="count">0 个对话</span><span><button id="new-thread">新建</button><button id="refresh">刷新</button></span></div>
       <nav id="threads" class="threads"></nav>
       <button id="load-more" class="load-more" hidden>查看更早对话</button>
     </aside>
@@ -55,6 +71,6 @@
   </main>
   <script src="https://lf-scm-cn.feishucdn.com/lark/op/h5-js-sdk-1.5.44.js"></script>
   <script src="/app.js?v=20260824-2"></script>
-  <script src="/local-composer.js?v=20260821-1"></script>
+  <script src="/local-composer.js?v=20260828-1"></script>
 </body>
 </html>

@@ -506,6 +506,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     "authRequired": not self.is_local_request(),
                     "authenticated": self.is_authenticated(),
                     "ownerConfigured": bool(state.get("owner_open_id")),
+                    "projectsRoot": os.getenv("CODEX_PROJECTS_ROOT") or str(ROOT.parent / "CodexProjects"),
+                    "standaloneDir": os.getenv("CODEX_STANDALONE_DIR") or str(DATA_DIR / "standalone"),
                 })
                 return
             if parsed.path.startswith("/api/") and not self.require_auth():
@@ -645,16 +647,22 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     return
                 size = min(int(self.headers.get("Content-Length") or 0), 24 * 1024 * 1024)
                 payload = json.loads(self.rfile.read(size) or b"{}")
+                operation = str(payload.get("op") or "message").strip()
                 thread_id = str(payload.get("threadId") or "").strip()
                 text = str(payload.get("text") or "").strip()
-                if not thread_id or not text:
+                if operation == "new_thread":
+                    if not text or not str(payload.get("cwd") or "").strip() or not str(payload.get("title") or "").strip():
+                        self.send_json({"error": "missing_new_thread_fields"}, 400)
+                        return
+                elif not thread_id or not text:
                     self.send_json({"error": "missing_thread_or_text"}, 400)
                     return
                 task_id = secrets.token_urlsafe(12)
                 with local_web_tasks_lock:
                     local_web_tasks[task_id] = {"id": task_id, "status": "queued", "message": "已提交到本机桥"}
                 threading.Thread(target=execute_local_web_task,
-                                 args=(task_id, thread_id, text, payload.get("files") or []), daemon=True).start()
+                                 args=(task_id, thread_id, text, payload.get("files") or [], operation,
+                                       str(payload.get("cwd") or ""), str(payload.get("title") or "")), daemon=True).start()
                 self.send_json({"taskId": task_id})
                 return
             self.send_error(404)
@@ -672,9 +680,25 @@ def set_local_web_task(task_id: str, **values) -> None:
         task.update(values)
 
 
-def execute_local_web_task(task_id: str, thread_id: str, text: str, files: list) -> None:
+def execute_local_web_task(task_id: str, thread_id: str, text: str, files: list,
+                           operation: str = "message", cwd_value: str = "", title: str = "") -> None:
     """Run a localhost UI request without requiring the cloud relay."""
     try:
+        if operation == "new_thread":
+            cwd = Path(cwd_value.strip())
+            if not cwd.is_absolute():
+                raise RuntimeError("项目目录必须是本机绝对路径")
+            cwd.mkdir(parents=True, exist_ok=True)
+            set_local_web_task(task_id, status="running", message="正在创建新对话")
+            with codex_lock:
+                result = codex_rpc.call("thread/start", {"cwd": str(cwd), "sandbox": "danger-full-access",
+                                                         "approvalPolicy": "never", "ephemeral": False})
+                thread_id = (result.get("thread") or {}).get("id")
+                if not thread_id:
+                    raise RuntimeError("Codex 没有返回新对话 ID")
+                codex_rpc.call("thread/name/set", {"threadId": thread_id, "name": title.strip()})
+            set_local_web_task(task_id, status="running", message="新对话已创建，正在发送第一条消息",
+                               threadId=thread_id, title=title.strip(), cwd=str(cwd))
         if not is_valid_thread_id(thread_id):
             raise RuntimeError("所选条目不是有效的 Codex 对话，请刷新列表后重新选择")
         saved_files = []
