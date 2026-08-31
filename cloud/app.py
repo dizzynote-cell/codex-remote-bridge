@@ -125,11 +125,16 @@ class H(BaseHTTPRequestHandler):
         if p.path=='/api/status':
             row=db.execute("SELECT value FROM meta WHERE key='heartbeat'").fetchone(); ts=int(row[0]) if row else 0; online=time.time()-ts<75
             runtime_row=db.execute("SELECT value FROM meta WHERE key='runtime'").fetchone();runtime=json.loads(runtime_row[0]) if runtime_row else {};working=bool(runtime.get('working')) if online else False
+            active_ids=[str(x) for x in (runtime.get('activeThreadIds') or []) if valid_thread_id(x)][:20] if online else []
+            active_threads=[]
+            for thread_id in active_ids:
+                thread_row=db.execute('SELECT name,cwd FROM threads WHERE id=?',(thread_id,)).fetchone()
+                active_threads.append({'id':thread_id,'name':thread_row[0] if thread_row else '正在运行的对话','cwd':thread_row[1] if thread_row else ''})
             history_row=db.execute("SELECT value FROM meta WHERE key='history_sync'").fetchone();history_ts=int(history_row[0]) if history_row else 0;history_stale=bool(online and time.time()-history_ts>120)
             notice_row=db.execute("SELECT value FROM meta WHERE key='service_notice'").fetchone(); notice=json.loads(notice_row[0]) if notice_row else None
             if notice and notice.get('state')=='restarting' and int(notice.get('until') or 0)>time.time():return self.json({'mode':'restarting','online':online,'label':'服务即将重启','seconds':max(1,int(notice['until']-time.time()))})
-            label='服务中断，请检查主机状态' if not online else ('PC 在线 · Codex 正在处理' if working else ('PC 在线 · 历史同步暂时延迟' if history_stale else 'PC 在线 · 同步正常'))
-            return self.json({'mode':'mobile' if online else 'offline','online':online,'working':working,'historyStale':history_stale,'desktopRunning':online,'label':label})
+            label='服务中断，请检查主机状态' if not online else ('PC 在线 · 历史同步暂时延迟' if history_stale else 'PC 在线 · 同步正常')
+            return self.json({'mode':'mobile' if online else 'offline','online':online,'working':working,'activeCount':len(active_threads) if active_threads else (1 if working else 0),'activeThreads':active_threads,'historyStale':history_stale,'desktopRunning':online,'label':label})
         if p.path=='/api/quota':
             row=db.execute("SELECT value FROM meta WHERE key='quota'").fetchone(); return self.json(json.loads(row[0]) if row else {'available':False})
         rel='index.html' if p.path=='/' else p.path.lstrip('/'); f=(WEB/rel).resolve()
@@ -139,7 +144,7 @@ class H(BaseHTTPRequestHandler):
         p=urlparse(self.path); n=min(int(self.headers.get('Content-Length') or 0),24*1024*1024); body=self.rfile.read(n)
         if p.path=='/api/device/heartbeat':
             if not secrets.compare_digest(self.headers.get('Authorization') or '',f'Bearer {SYNC_TOKEN}'):return self.json({'error':'unauthorized'},401)
-            data=json.loads(body or b'{}');now=int(time.time());runtime={'working':bool(data.get('working')),'historySyncAge':data.get('historySyncAge'),'historyError':str(data.get('historyError') or '')[:300],'updatedAt':now}
+            data=json.loads(body or b'{}');now=int(time.time());active_ids=[str(x) for x in (data.get('activeThreadIds') or []) if valid_thread_id(x)][:20];runtime={'working':bool(data.get('working')),'activeThreadIds':active_ids,'historySyncAge':data.get('historySyncAge'),'historyError':str(data.get('historyError') or '')[:300],'updatedAt':now}
             db.execute("INSERT INTO meta VALUES('heartbeat',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(str(now),));db.execute("INSERT INTO meta VALUES('runtime',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(json.dumps(runtime,ensure_ascii=False),));db.commit();return self.json({'ok':True})
         if p.path.startswith('/api/device/output-files/'):
             if not secrets.compare_digest(self.headers.get('Authorization') or '',f'Bearer {SYNC_TOKEN}'):return self.json({'error':'unauthorized'},401)
