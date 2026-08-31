@@ -91,6 +91,7 @@ web_sessions: dict[str, float] = {}
 web_sessions_lock = threading.RLock()
 local_web_tasks: dict[str, dict] = {}
 local_web_tasks_lock = threading.RLock()
+cloud_runtime_state = {"last_history_sync": 0.0, "last_error": "", "detected_working": False, "detected_at": 0.0}
 message_chat_ids: dict[str, str] = {}
 http = requests.Session()
 http.mount("https://", HTTPAdapter(max_retries=Retry(
@@ -797,11 +798,18 @@ def sync_cloud_history() -> None:
             page = list_threads_page(50, None)
             changed = []
             pending_hashes = {}
+            detected_working = False
             for summary in page.get("data", []):
                 thread_id = summary.get("id")
                 if not thread_id:
                     continue
                 thread = enrich_thread_attachments(read_thread(thread_id), True)
+                for turn in thread.get("turns", []):
+                    turn_status = turn.get("status")
+                    turn_status = turn_status.get("type") if isinstance(turn_status, dict) else turn_status
+                    if turn_status in {"inProgress", "in_progress", "running", "active", "started"}:
+                        detected_working = True
+                        break
                 raw = json.dumps(thread, ensure_ascii=False, sort_keys=True, default=str)
                 digest = __import__("hashlib").sha256(raw.encode("utf-8")).hexdigest()
                 if last_hashes.get(thread_id) != digest:
@@ -834,7 +842,10 @@ def sync_cloud_history() -> None:
                 if result.returncode != 0:
                     raise RuntimeError(result.stderr.strip() or f"SSH 同步退出码 {result.returncode}")
             last_hashes.update(pending_hashes)
+            cloud_runtime_state.update(last_history_sync=time.time(), last_error="",
+                                       detected_working=detected_working, detected_at=time.time())
         except Exception as error:
+            cloud_runtime_state["last_error"] = str(error)[:300]
             log(f"云端只读历史同步失败：{error}")
         time.sleep(2 if active_turns else 5)
 
@@ -842,6 +853,27 @@ def sync_cloud_history() -> None:
 def cloud_base_url() -> str:
     sync_url = (os.getenv("CODEX_HISTORY_URL") or "").strip().rstrip("/")
     return sync_url.split("/api/", 1)[0] if "/api/" in sync_url else sync_url
+
+
+def cloud_heartbeat_worker() -> None:
+    """Report liveness independently so slow history reads cannot look like an outage."""
+    base = cloud_base_url()
+    token = (os.getenv("CODEX_HISTORY_SYNC_TOKEN") or "").strip()
+    if not base or not token:
+        return
+    while True:
+        try:
+            last_sync = float(cloud_runtime_state.get("last_history_sync") or 0)
+            detected_recently = bool(cloud_runtime_state.get("detected_working")) and time.time() - float(cloud_runtime_state.get("detected_at") or 0) < 120
+            response = requests.post(f"{base}/api/device/heartbeat",
+                headers={"Authorization": f"Bearer {token}"},
+                json={"working": bool(active_turns) or detected_recently,
+                      "historySyncAge": max(0, int(time.time() - last_sync)) if last_sync else None,
+                      "historyError": cloud_runtime_state.get("last_error") or ""}, timeout=(8, 15))
+            response.raise_for_status()
+        except Exception as error:
+            log(f"云端心跳暂时失败：{error}")
+        time.sleep(10)
 
 
 def cloud_task_report(task_id: str, kind: str, payload: dict, status: str | None = None,
@@ -1516,6 +1548,7 @@ event_handler = (
 def main() -> None:
     threading.Thread(target=monitor_desktop_mode, daemon=True).start()
     threading.Thread(target=sync_cloud_history, daemon=True).start()
+    threading.Thread(target=cloud_heartbeat_worker, daemon=True).start()
     threading.Thread(target=cloud_task_worker, daemon=True).start()
     start_dashboard()
     log("正在连接飞书开放平台……")

@@ -123,10 +123,13 @@ class H(BaseHTTPRequestHandler):
             row=db.execute('SELECT payload FROM threads WHERE id=?',(unquote(p.path.split('/api/thread/',1)[1]),)).fetchone()
             return self.json({'thread':json.loads(row[0])} if row else {'error':'对话尚未同步'},200 if row else 404)
         if p.path=='/api/status':
-            row=db.execute("SELECT value FROM meta WHERE key='heartbeat'").fetchone(); ts=int(row[0]) if row else 0; online=time.time()-ts<45
+            row=db.execute("SELECT value FROM meta WHERE key='heartbeat'").fetchone(); ts=int(row[0]) if row else 0; online=time.time()-ts<75
+            runtime_row=db.execute("SELECT value FROM meta WHERE key='runtime'").fetchone();runtime=json.loads(runtime_row[0]) if runtime_row else {};working=bool(runtime.get('working')) if online else False
+            history_row=db.execute("SELECT value FROM meta WHERE key='history_sync'").fetchone();history_ts=int(history_row[0]) if history_row else 0;history_stale=bool(online and time.time()-history_ts>120)
             notice_row=db.execute("SELECT value FROM meta WHERE key='service_notice'").fetchone(); notice=json.loads(notice_row[0]) if notice_row else None
             if notice and notice.get('state')=='restarting' and int(notice.get('until') or 0)>time.time():return self.json({'mode':'restarting','online':online,'label':'服务即将重启','seconds':max(1,int(notice['until']-time.time()))})
-            return self.json({'mode':'mobile' if online else 'offline','online':online,'desktopRunning':online,'label':('PC 在线 · 只读同步正常' if online else '服务中断，请检查主机状态')})
+            label='服务中断，请检查主机状态' if not online else ('PC 在线 · Codex 正在处理' if working else ('PC 在线 · 历史同步暂时延迟' if history_stale else 'PC 在线 · 同步正常'))
+            return self.json({'mode':'mobile' if online else 'offline','online':online,'working':working,'historyStale':history_stale,'desktopRunning':online,'label':label})
         if p.path=='/api/quota':
             row=db.execute("SELECT value FROM meta WHERE key='quota'").fetchone(); return self.json(json.loads(row[0]) if row else {'available':False})
         rel='index.html' if p.path=='/' else p.path.lstrip('/'); f=(WEB/rel).resolve()
@@ -134,6 +137,10 @@ class H(BaseHTTPRequestHandler):
         b=f.read_bytes(); ct={'.html':'text/html','.js':'application/javascript','.css':'text/css'}.get(f.suffix,'application/octet-stream'); self.send_response(200); self.send_header('Content-Type',ct+'; charset=utf-8'); self.send_header('Cache-Control','no-cache, no-store, must-revalidate'); self.send_header('Pragma','no-cache'); self.send_header('Expires','0'); self.send_header('Content-Length',str(len(b))); self.end_headers(); self.wfile.write(b)
     def do_POST(self):
         p=urlparse(self.path); n=min(int(self.headers.get('Content-Length') or 0),24*1024*1024); body=self.rfile.read(n)
+        if p.path=='/api/device/heartbeat':
+            if not secrets.compare_digest(self.headers.get('Authorization') or '',f'Bearer {SYNC_TOKEN}'):return self.json({'error':'unauthorized'},401)
+            data=json.loads(body or b'{}');now=int(time.time());runtime={'working':bool(data.get('working')),'historySyncAge':data.get('historySyncAge'),'historyError':str(data.get('historyError') or '')[:300],'updatedAt':now}
+            db.execute("INSERT INTO meta VALUES('heartbeat',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(str(now),));db.execute("INSERT INTO meta VALUES('runtime',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(json.dumps(runtime,ensure_ascii=False),));db.commit();return self.json({'ok':True})
         if p.path.startswith('/api/device/output-files/'):
             if not secrets.compare_digest(self.headers.get('Authorization') or '',f'Bearer {SYNC_TOKEN}'):return self.json({'error':'unauthorized'},401)
             file_id=unquote(p.path.split('/api/device/output-files/',1)[1]);name=unquote(self.headers.get('X-File-Name') or 'file');mime=self.headers.get('X-File-Mime') or 'application/octet-stream'
@@ -149,6 +156,7 @@ class H(BaseHTTPRequestHandler):
                 raw=json.dumps(t,ensure_ascii=False,separators=(',',':')); h=hashlib.sha256(raw.encode()).hexdigest()
                 db.execute('INSERT INTO threads VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,cwd=excluded.cwd,status=excluded.status,preview=excluded.preview,updated_at=excluded.updated_at,payload=excluded.payload,content_hash=excluded.content_hash,synced_at=excluded.synced_at',(str(t['id']),text_value(t.get('name')),text_value(t.get('cwd')),text_value(t.get('status')),text_value(t.get('preview')),text_value(t.get('updatedAt')),raw,h,now))
             db.execute("INSERT INTO meta VALUES('heartbeat',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(str(now),))
+            db.execute("INSERT INTO meta VALUES('history_sync',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(str(now),))
             db.execute("DELETE FROM meta WHERE key='service_notice'")
             if data.get('quota') is not None:db.execute("INSERT INTO meta VALUES('quota',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(json.dumps(data['quota']),))
             db.commit(); return self.json({'ok':True,'count':len(data.get('threads',[]))})
