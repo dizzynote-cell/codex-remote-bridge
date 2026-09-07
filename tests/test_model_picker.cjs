@@ -47,12 +47,12 @@ async function main(){
   p.thread({id:'thread-two',turns:[]});assert.equal(p.capture('thread-two').model,'a');
   p.begin('thread-one');p.thread({id:'thread-one',turns:[{status:'inProgress',bridgeModel:{requested:'a',effort:'low'}}]});
   assert.equal(p.capture('thread-one').model,'b');
-  assert.match(section.querySelector('span').textContent,/本轮：a/);
+  assert.equal(section.querySelector('span').textContent,'');
   assert.equal(p.capture('thread-one').followDefaults,false);
   assert.equal(p.capture('thread-one').effort,'high');
   assert.ok(!section.html.includes('model-follow'));
   assert.ok(!section.html.includes('下次模型'));
   assert.match(p.label({}),/未记录/);
-  console.log('PASS picker defaults, per-thread memory, effort, switching, running label, draft-only selection, accepted persistence');
+  console.log('PASS picker defaults, per-thread memory, effort, switching, no routine annotation, draft-only selection, accepted persistence');
 }
 main().catch(e=>{console.error(e);process.exitCode=1;});
