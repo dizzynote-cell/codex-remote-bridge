@@ -24,6 +24,33 @@ def valid_thread_id(value):
     try: uuid.UUID(str(value).removeprefix('urn:uuid:')); return True
     except (ValueError,AttributeError,TypeError): return False
 
+
+MODEL_LOCK=__import__('threading').RLock()
+def model_settings():
+    row=db.execute("SELECT value FROM meta WHERE key='model_settings'").fetchone()
+    return json.loads(row[0]) if row else {'models':[],'choices':{}}
+
+def valid_effort(model,effort):
+    entry=next((m for m in model_settings()['models'] if m['model']==model),{})
+    return effort in {e['reasoningEffort'] for e in entry.get('supportedReasoningEfforts',[])}
+
+def merge_model_settings(incoming):
+    with MODEL_LOCK:
+        saved=model_settings()
+        if incoming.get('models'):
+            saved['models']=incoming['models']
+        if incoming.get('defaults'):saved['defaults']=incoming['defaults']
+        allowed={m['model'] for m in saved['models']}
+        for thread_id,choice in (incoming.get('choices') or {}).items():
+            if not valid_thread_id(thread_id) or not isinstance(choice,dict):continue
+            stamp=choice.get('updated')
+            if (choice.get('model') is not None and choice.get('model') not in allowed) or not isinstance(stamp,(float,int)) or not 0<stamp<time.time()+60:continue
+            if stamp>saved['choices'].get(thread_id,{}).get('updated',0):
+                saved['choices'][thread_id]={'model':choice.get('model'),'effort':choice.get('effort'),'updated':stamp}
+        db.execute("INSERT INTO meta VALUES('model_settings',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(json.dumps(saved),))
+        db.commit()
+        return saved
+
 def post_json(url,payload,headers=None):
     req=Request(url,data=json.dumps(payload).encode(),headers={'Content-Type':'application/json',**(headers or {})},method='POST')
     with urlopen(req,timeout=20) as r:return json.loads(r.read())
@@ -83,6 +110,12 @@ class H(BaseHTTPRequestHandler):
             changed=db.execute("UPDATE tasks SET status='claimed',claimed_at=?,updated_at=? WHERE id=? AND status='queued'",(now,now,row[0])).rowcount; db.commit()
             if not changed:return self.json({'task':None})
             task=dict(zip(('id','op','threadId','title','cwd','text','source','createdAt'),row)); files=db.execute('SELECT id,name,mime,size FROM task_files WHERE task_id=? ORDER BY created_at',(row[0],)).fetchall(); task['files']=[dict(zip(('id','name','mime','size'),f)) for f in files]
+            model_row=db.execute('SELECT value FROM meta WHERE key=?',('task_model:'+task['id'],)).fetchone()
+            choice=json.loads(model_row[0]) if model_row else {}
+            task['model']=choice.get('model')
+            task['modelUpdated']=choice.get('updated')
+            task['effort']=choice.get('effort')
+            task['followDefaults']=choice.get('followDefaults',False)
             return self.json({'task':task})
         if p.path=='/api/device/storage':
             if not secrets.compare_digest(self.headers.get('Authorization') or '',f'Bearer {SYNC_TOKEN}'):return self.json({'error':'unauthorized'},401)
@@ -101,6 +134,7 @@ class H(BaseHTTPRequestHandler):
             if not f.is_file():return self.send_error(404)
             b=f.read_bytes(); self.send_response(200); self.send_header('Content-Type',row[1] or 'application/octet-stream'); self.send_header('Content-Length',str(len(b))); self.send_header('X-File-Name',quote(row[0])); self.end_headers(); self.wfile.write(b); return
         if p.path.startswith('/api/') and not self.authed():return self.json({'error':'feishu_login_required'},401)
+        if p.path=='/api/models':return self.json(model_settings())
         if p.path.startswith('/api/output-files/'):
             file_id=unquote(p.path.split('/api/output-files/',1)[1]);row=db.execute('SELECT name,mime,size,path,expires_at FROM output_files WHERE id=?',(file_id,)).fetchone()
             if not row or row[4]<int(time.time()) or not Path(row[3]).is_file():return self.send_error(404)
@@ -145,7 +179,7 @@ class H(BaseHTTPRequestHandler):
         if p.path=='/api/device/heartbeat':
             if not secrets.compare_digest(self.headers.get('Authorization') or '',f'Bearer {SYNC_TOKEN}'):return self.json({'error':'unauthorized'},401)
             data=json.loads(body or b'{}');now=int(time.time());active_ids=[str(x) for x in (data.get('activeThreadIds') or []) if valid_thread_id(x)][:20];runtime={'working':bool(data.get('working')),'activeThreadIds':active_ids,'historySyncAge':data.get('historySyncAge'),'historyError':str(data.get('historyError') or '')[:300],'updatedAt':now}
-            db.execute("INSERT INTO meta VALUES('heartbeat',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(str(now),));db.execute("INSERT INTO meta VALUES('runtime',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(json.dumps(runtime,ensure_ascii=False),));db.commit();return self.json({'ok':True})
+            db.execute("INSERT INTO meta VALUES('heartbeat',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(str(now),));db.execute("INSERT INTO meta VALUES('runtime',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(json.dumps(runtime,ensure_ascii=False),));db.commit();settings=merge_model_settings(data.get('modelSettings') or {});return self.json({'ok':True,'modelChoices':settings['choices']})
         if p.path.startswith('/api/device/output-files/'):
             if not secrets.compare_digest(self.headers.get('Authorization') or '',f'Bearer {SYNC_TOKEN}'):return self.json({'error':'unauthorized'},401)
             file_id=unquote(p.path.split('/api/device/output-files/',1)[1]);name=unquote(self.headers.get('X-File-Name') or 'file');mime=self.headers.get('X-File-Mime') or 'application/octet-stream'
@@ -185,12 +219,24 @@ class H(BaseHTTPRequestHandler):
                         except OSError:pass
                         db.execute('DELETE FROM task_files WHERE id=?',(str(file_id),))
             db.commit(); return self.json({'ok':True})
+        if p.path=='/api/model-choice':
+            if not self.authed():return self.json({'error':'feishu_login_required'},401)
+            data=json.loads(body or b'{}');thread_id=str(data.get('threadId') or '');model=data.get('model')
+            if not valid_thread_id(thread_id):return self.json({'error':'invalid_thread_id'},400)
+            if model and model not in {m['model'] for m in model_settings()['models']}:return self.json({'error':'模型不可用，请等待本机同步模型列表'},400)
+            effort=data.get('effort')
+            if model and effort and not valid_effort(model,effort):return self.json({'error':'该模型不支持此推理强度'},400)
+            return self.json(merge_model_settings({'choices':{thread_id:{'model':model,'effort':effort,'updated':time.time()}}}))
         if p.path=='/api/tasks':
             if not self.authed():return self.json({'error':'feishu_login_required'},401)
             data=json.loads(body or b'{}'); op=str(data.get('op') or 'message'); thread_id=str(data.get('threadId') or '').strip(); text=str(data.get('text') or '').strip(); title=str(data.get('title') or '').strip(); cwd=str(data.get('cwd') or '').strip()
             if op=='message' and (not thread_id or not text):return self.json({'error':'missing_thread_or_text'},400)
             if op=='message' and not valid_thread_id(thread_id):return self.json({'error':'invalid_thread_id','message':'所选条目不是有效的 Codex 对话，请刷新后重新选择'},400)
             if op=='new_thread' and (not title or not cwd):return self.json({'error':'missing_title_or_cwd'},400)
+            model=data.get('model')
+            if model and model not in {m['model'] for m in model_settings()['models']}:return self.json({'error':'模型不可用，请刷新模型列表'},400)
+            effort=data.get('effort')
+            if model and effort and not valid_effort(model,effort):return self.json({'error':'该模型不支持此推理强度'},400)
             incoming=data.get('files') or []
             if len(incoming)>3:return self.json({'error':'too_many_files'},400)
             decoded=[]; total=0
@@ -202,6 +248,9 @@ class H(BaseHTTPRequestHandler):
                     decoded.append((name,str(item.get('mime') or 'application/octet-stream'),raw))
             except (ValueError,binascii.Error) as error:return self.json({'error':str(error)},400)
             task_id=uuid.uuid4().hex; now=int(time.time()); db.execute('INSERT INTO tasks(id,op,thread_id,title,cwd,text,source,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)',(task_id,op,thread_id or None,title or None,cwd or None,text or None,'web','queued',now,now))
+            if model:
+                db.execute('INSERT OR REPLACE INTO meta VALUES(?,?)',('task_model:'+task_id,json.dumps({'model':model,'effort':effort,'followDefaults':bool(data.get('followDefaults')),'updated':time.time()})))
+                if thread_id and not data.get('followDefaults'):merge_model_settings({'choices':{thread_id:{'model':model,'effort':effort,'updated':time.time()}}})
             for name,mime,raw in decoded:
                 file_id=uuid.uuid4().hex; path=UPLOADS/f'{file_id}{Path(name).suffix.lower()}'; path.write_bytes(raw); db.execute('INSERT INTO task_files VALUES(?,?,?,?,?,?,?)',(file_id,task_id,name,mime,len(raw),str(path),now))
             db.execute('INSERT INTO task_events(task_id,kind,payload,created_at) VALUES(?,?,?,?)',(task_id,'queued',json.dumps({'message':'已提交，等待本机桥接收','files':[x[0] for x in decoded]},ensure_ascii=False),now)); db.commit(); return self.json({'ok':True,'taskId':task_id,'status':'queued'},202)

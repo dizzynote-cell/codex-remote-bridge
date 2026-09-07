@@ -81,6 +81,8 @@ state = load_state()
 seen = set(state.get("seen_message_ids", []))
 codex_lock = threading.RLock()
 codex_rpc = CodexRpc()
+from model_choices import ModelChoices
+model_choices = ModelChoices(DATA_DIR, lambda: codex_rpc, codex_lock)
 active_turns: dict[str, str] = {}
 thread_message_locks: dict[str, threading.Lock] = {}
 thread_message_locks_guard = threading.Lock()
@@ -457,7 +459,7 @@ def read_thread(thread_id: str) -> dict:
             "threadId": thread_id,
             "includeTurns": True,
         })
-    return result.get("thread", {})
+    return model_choices.enrich(result.get("thread", {}))
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
@@ -513,6 +515,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 })
                 return
             if parsed.path.startswith("/api/") and not self.require_auth():
+                return
+            if parsed.path == "/api/models":
+                self.send_json(model_choices.snapshot())
                 return
             if parsed.path == "/api/threads":
                 query = parse_qs(parsed.query)
@@ -643,6 +648,19 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.send_header("Set-Cookie", "bridge_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0")
                 self.end_headers()
                 return
+            if parsed.path == "/api/model-choice":
+                if not self.is_local_request():
+                    self.send_json({"error": "local_only"}, 403)
+                    return
+                size = min(int(self.headers.get("Content-Length") or 0), 8192)
+                payload = json.loads(self.rfile.read(size) or b"{}")
+                thread_id = str(payload.get("threadId") or "")
+                if not is_valid_thread_id(thread_id):
+                    self.send_json({"error": "invalid_thread_id"}, 400)
+                    return
+                model_choices.choose(thread_id, payload.get("model"), effort=payload.get("effort"))
+                self.send_json(model_choices.snapshot(False))
+                return
             if parsed.path == "/api/local-tasks":
                 if not self.is_local_request():
                     self.send_json({"error": "local_only"}, 403)
@@ -659,12 +677,19 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 elif not thread_id or not text:
                     self.send_json({"error": "missing_thread_or_text"}, 400)
                     return
+                requested_model = payload.get("model")
+                if requested_model:
+                    model_choices.validate(requested_model)
+                    if payload.get("effort"):
+                        model_choices.validate_effort(requested_model, payload["effort"])
+                    if operation != "new_thread" and is_valid_thread_id(thread_id) and not payload.get("followDefaults"):
+                        model_choices.choose(thread_id, requested_model, effort=payload.get("effort"))
                 task_id = secrets.token_urlsafe(12)
                 with local_web_tasks_lock:
                     local_web_tasks[task_id] = {"id": task_id, "status": "queued", "message": "已提交到本机桥"}
                 threading.Thread(target=execute_local_web_task,
                                  args=(task_id, thread_id, text, payload.get("files") or [], operation,
-                                       str(payload.get("cwd") or ""), str(payload.get("title") or "")), daemon=True).start()
+                                       str(payload.get("cwd") or ""), str(payload.get("title") or ""), requested_model, payload.get("effort"), bool(payload.get("followDefaults"))), daemon=True).start()
                 self.send_json({"taskId": task_id})
                 return
             self.send_error(404)
@@ -683,7 +708,7 @@ def set_local_web_task(task_id: str, **values) -> None:
 
 
 def execute_local_web_task(task_id: str, thread_id: str, text: str, files: list,
-                           operation: str = "message", cwd_value: str = "", title: str = "") -> None:
+                           operation: str = "message", cwd_value: str = "", title: str = "", requested_model=None, requested_effort=None, follow_defaults=False) -> None:
     """Run a localhost UI request without requiring the cloud relay."""
     try:
         if operation == "new_thread":
@@ -703,6 +728,8 @@ def execute_local_web_task(task_id: str, thread_id: str, text: str, files: list,
                                threadId=thread_id, title=title.strip(), cwd=str(cwd))
         if not is_valid_thread_id(thread_id):
             raise RuntimeError("所选条目不是有效的 Codex 对话，请刷新列表后重新选择")
+        if requested_model and operation == "new_thread" and not follow_defaults:
+            model_choices.choose(thread_id, requested_model, effort=requested_effort)
         saved_files = []
         day_dir = WEB_INBOX_DIR / datetime.now().strftime("%Y-%m-%d")
         day_dir.mkdir(parents=True, exist_ok=True)
@@ -742,7 +769,7 @@ def execute_local_web_task(task_id: str, thread_id: str, text: str, files: list,
             before = read_thread(thread_id)
             previous_turn_ids = {turn.get("id") for turn in before.get("turns", [])}
             codex_rpc.call("thread/resume", {"threadId": thread_id, "sandbox": "danger-full-access", "approvalPolicy": "never"})
-            result = codex_rpc.call("turn/start", {"threadId": thread_id, "input": codex_input})
+            result = model_choices.start(thread_id, codex_input, requested_model, effort=requested_effort)
             turn_id = (result.get("turn") or {}).get("id")
             if turn_id:
                 active_turns[thread_id] = turn_id
@@ -859,6 +886,15 @@ def cloud_base_url() -> str:
     return sync_url.split("/api/", 1)[0] if "/api/" in sync_url else sync_url
 
 
+def model_catalog_worker() -> None:
+    while True:
+        try:
+            model_choices.snapshot()
+        except Exception as error:
+            log(f"模型列表读取暂时失败：{error}")
+        time.sleep(15)
+
+
 def cloud_heartbeat_worker() -> None:
     """Report liveness independently so slow history reads cannot look like an outage."""
     base = cloud_base_url()
@@ -873,11 +909,12 @@ def cloud_heartbeat_worker() -> None:
                 (list(cloud_runtime_state.get("detected_thread_ids") or []) if detected_recently else [])))
             response = requests.post(f"{base}/api/device/heartbeat",
                 headers={"Authorization": f"Bearer {token}"},
-                json={"working": bool(active_thread_ids) or bool(active_turns) or detected_recently,
+                json={"modelSettings": model_choices.snapshot(False), "working": bool(active_thread_ids) or bool(active_turns) or detected_recently,
                       "activeThreadIds": active_thread_ids,
                       "historySyncAge": max(0, int(time.time() - last_sync)) if last_sync else None,
                       "historyError": cloud_runtime_state.get("last_error") or ""}, timeout=(8, 15))
             response.raise_for_status()
+            model_choices.merge(response.json().get("modelChoices") or {})
         except Exception as error:
             log(f"云端心跳暂时失败：{error}")
         time.sleep(10)
@@ -963,6 +1000,10 @@ def execute_cloud_task(task: dict) -> None:
             raise RuntimeError("网页任务缺少对话或文字")
         if not is_valid_thread_id(thread_id):
             raise RuntimeError("所选条目不是有效的 Codex 对话，请刷新列表后重新选择")
+        requested_model = task.get("model")
+        requested_effort = task.get("effort")
+        if requested_model and not task.get("followDefaults"):
+            model_choices.choose(thread_id, requested_model, task.get("modelUpdated"), effort=requested_effort)
         local_files = download_cloud_task_files(task)
         if local_files:
             text += "\n\n我从网页端上传了以下本机临时文件，请读取并处理：\n" + "\n".join(str(path) for path in local_files)
@@ -993,7 +1034,7 @@ def execute_cloud_task(task: dict) -> None:
             previous_turn_ids = {turn.get("id") for turn in before.get("turns", [])}
             codex_rpc.call("thread/resume", {"threadId": thread_id, "sandbox": "danger-full-access",
                                              "approvalPolicy": "never"})
-            result = codex_rpc.call("turn/start", {"threadId": thread_id, "input": codex_input})
+            result = model_choices.start(thread_id, codex_input, requested_model, effort=requested_effort)
             turn_id = (result.get("turn") or {}).get("id")
             if turn_id:
                 active_turns[thread_id] = turn_id
@@ -1348,7 +1389,7 @@ def send_to_codex(message_id: str, chat_id: str, text: str, codex_input: list | 
         before = read_thread(thread_id)
         previous_turn_ids = {turn.get("id") for turn in before.get("turns", [])}
         try:
-            codex_rpc.call("thread/resume", {
+            resumed = codex_rpc.call("thread/resume", {
                 "threadId": thread_id,
                 "sandbox": "danger-full-access",
                 "approvalPolicy": "never",
@@ -1360,15 +1401,12 @@ def send_to_codex(message_id: str, chat_id: str, text: str, codex_input: list | 
                     "或者在飞书绑定一个当前未打开的对话。"
                 ) from error
             raise
-        result = codex_rpc.call("turn/start", {
-            "threadId": thread_id,
-            "input": codex_input,
-        })
+        result = model_choices.start(thread_id, codex_input, fallback=resumed.get("model"))
         turn = result.get("turn", {})
         turn_id = turn.get("id")
         if turn_id:
             active_turns[thread_id] = turn_id
-    reply_text(message_id, f"已发送到 Codex：{before.get('name') or '当前对话'}")
+    reply_text(message_id, f"已发送到 Codex：{before.get('name') or '当前对话'}\n本轮请求模型：{result['bridgeModel']['requested']} · {result['bridgeModel']['effort']}")
 
     deadline = time.monotonic() + 1800
     progress_sent = False
@@ -1555,6 +1593,7 @@ event_handler = (
 def main() -> None:
     threading.Thread(target=monitor_desktop_mode, daemon=True).start()
     threading.Thread(target=sync_cloud_history, daemon=True).start()
+    threading.Thread(target=model_catalog_worker, daemon=True).start()
     threading.Thread(target=cloud_heartbeat_worker, daemon=True).start()
     threading.Thread(target=cloud_task_worker, daemon=True).start()
     start_dashboard()
