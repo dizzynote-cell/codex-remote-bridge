@@ -40,15 +40,19 @@ async function main(){
   assert.equal(p.capture('thread-one').model,'b');
   assert.equal(p.capture('thread-one').effort,'high');
   assert.equal(p.capture('thread-one').followDefaults,false);
+  assert.equal(Object.keys(choices).length,0,'selection must not POST settings');
+  await p.refresh();assert.equal(p.capture('thread-one').effort,'high','poll must preserve draft');
+  p.accepted('thread-one',p.capture('thread-one'));
   p.begin('thread-two');assert.throws(()=>p.capture('thread-two'));
   p.thread({id:'thread-two',turns:[]});assert.equal(p.capture('thread-two').model,'a');
   p.begin('thread-one');p.thread({id:'thread-one',turns:[{status:'inProgress',bridgeModel:{requested:'a',effort:'low'}}]});
   assert.equal(p.capture('thread-one').model,'b');
   assert.match(section.querySelector('span').textContent,/本轮：a/);
-  await section.querySelector('button').onclick();
-  assert.equal(p.capture('thread-one').followDefaults,true);
-  assert.equal(p.capture('thread-one').effort,'low');
+  assert.equal(p.capture('thread-one').followDefaults,false);
+  assert.equal(p.capture('thread-one').effort,'high');
+  assert.ok(!section.html.includes('model-follow'));
+  assert.ok(!section.html.includes('下次模型'));
   assert.match(p.label({}),/未记录/);
-  console.log('PASS picker defaults, per-thread memory, effort, switching, running label, reset');
+  console.log('PASS picker defaults, per-thread memory, effort, switching, running label, draft-only selection, accepted persistence');
 }
 main().catch(e=>{console.error(e);process.exitCode=1;});

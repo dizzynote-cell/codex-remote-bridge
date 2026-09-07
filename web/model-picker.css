@@ -2,4 +2,4 @@
 .model-bar label{display:flex;align-items:center;gap:8px;white-space:nowrap}
 .model-bar select,#new-thread-model,#new-thread-effort{color:#e7edf5;background:#232b36;border:1px solid #49566a;border-radius:8px;padding:7px 10px;max-width:240px;font:inherit}
 .model-bar button{background:transparent;color:#91c2af;border:1px solid #49566a;border-radius:7px;padding:6px;cursor:pointer}.model-bar button:disabled{opacity:.5;cursor:default}.model-bar select:disabled{opacity:.65}.model-bar span{overflow-wrap:anywhere}.model-error span{color:#ffb68d}
-@media(max-width:640px){.model-bar{padding:8px 12px;gap:6px}.model-bar label{width:100%;justify-content:space-between}.model-bar select{max-width:65%;min-width:155px}.model-bar span{font-size:11px}}
+@media(max-width:640px){.model-bar{padding:6px 10px;gap:6px;display:grid;grid-template-columns:minmax(0,1fr) minmax(0,.65fr)}.model-bar label{min-width:0;gap:4px;font-size:11px}.model-bar select{width:100%;min-width:0;max-width:none;padding:6px 2px;font-size:12px}.model-bar span{grid-column:1/-1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:10px}.model-bar span:empty{display:none}}
