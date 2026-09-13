@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 xiyannan
 // Project: Codex Remote Bridge
+// PAIRED UI CONTRACT: keep conversation loading and interaction behavior aligned with the sibling web app.
 const els={threads:document.querySelector('#threads'),search:document.querySelector('#search'),count:document.querySelector('#count'),title:document.querySelector('#title'),meta:document.querySelector('#meta'),messages:document.querySelector('#messages'),refresh:document.querySelector('#refresh'),mode:document.querySelector('#mode'),loadMore:document.querySelector('#load-more'),quota:document.querySelector('#quota'),menu:document.querySelector('#menu'),backdrop:document.querySelector('#sidebar-backdrop'),authGate:document.querySelector('#auth-gate'),authMessage:document.querySelector('#auth-message'),authRetry:document.querySelector('#auth-retry')};
 let threads=[],selected=null,selectedProjectCwd=null,threadLoading=false,lastThreadSignature='',nextCursor=null,runtimeConfig={projectsRoot:'',standaloneDir:''},threadVisibleCounts=new Map(),threadRequestSerial=0,threadController=null;
 const mobileDevice=/Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent)||navigator.maxTouchPoints>1&&Math.min(screen.width,screen.height)<900;
