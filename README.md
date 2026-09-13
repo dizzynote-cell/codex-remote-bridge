@@ -1,6 +1,6 @@
 # Codex Remote Bridge
 
-**v0.2.5-beta 测试版 · 作者：[xiyannan](https://github.com/dizzynote-cell/codex-remote-bridge)**
+**v0.2.6-beta 测试版 · 作者：[xiyannan](https://github.com/dizzynote-cell/codex-remote-bridge)**
 
 [查看版本更新日志](CHANGELOG.md)
 

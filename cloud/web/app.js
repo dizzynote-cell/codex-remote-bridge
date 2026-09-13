@@ -51,6 +51,21 @@ async function loadThread(id,silent=false,showOlder=false){
   }catch(error){if(error.name!=='AbortError'&&!silent)els.messages.innerHTML='<div class="loading">读取失败，请重试</div>';}
   finally{if(requestId===threadRequestSerial){threadLoading=false;threadController=null;}}
 }
+function requestFeishuCode(appId){
+  return new Promise((resolve,reject)=>{
+    if(!window.tt?.requestAccess){
+      const back=location.pathname+location.search+location.hash;
+      location.replace(`/api/auth/oauth/start?return_to=${encodeURIComponent(back)}`);
+      return;
+    }
+    window.tt.requestAccess({
+      appID:appId,
+      scopeList:[],
+      success:result=>resolve(result.code),
+      fail:result=>reject(new Error(result?.errMsg||'飞书授权失败')),
+    });
+  });
+}
 async function authenticate(){els.authGate.hidden=false;els.authRetry.hidden=true;els.authMessage.textContent='正在连接飞书并确认身份…';try{const config=await(await fetch('/api/auth/config',{cache:'no-store'})).json();runtimeConfig={projectsRoot:config.projectsRoot||'',standaloneDir:config.standaloneDir||''};if(!config.authRequired||config.authenticated){els.authGate.hidden=true;return true;}if(!config.ownerConfigured)throw new Error('桥尚未绑定所有者，请先在机器人单聊中发送一条消息');const code=await requestFeishuCode(config.appId);const response=await fetch('/api/auth/feishu',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code})});const result=await response.json();if(!response.ok)throw new Error(result.error==='owner_mismatch'?'当前飞书账号不是桥的所有者':(result.message||'身份验证失败'));els.authGate.hidden=true;return true;}catch(error){els.authMessage.textContent=error.message||'身份验证失败';els.authRetry.hidden=false;return false;}}
 const composer=document.querySelector('#composer'),promptBox=document.querySelector('#prompt'),sendButton=document.querySelector('#send'),taskStrip=document.querySelector('#task-strip'),newThreadButton=document.querySelector('#new-thread'),fileInput=document.querySelector('#files'),fileList=document.querySelector('#file-list'),quotaDetails=document.querySelector('#quota-details'),activityButton=document.querySelector('#activity'),activityDetails=document.querySelector('#activity-details');
 const threadMenu=document.querySelector('#thread-menu'),hideThreadButton=document.querySelector('#hide-thread'),cancelThreadMenu=document.querySelector('#cancel-thread-menu');

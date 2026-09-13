@@ -9,4 +9,6 @@ for(const file of ['web/app.js','cloud/web/app.js']){
   assert.match(source,/查看更早 6 轮/);
   assert.doesNotMatch(source,/async function loadThread\(id,silent=false\)\{if\(threadLoading\)return/);
 }
+// Only the hosted UI performs Feishu OAuth; local UI is authenticated by loopback access.
+assert.match(fs.readFileSync('cloud/web/app.js','utf8'),/function requestFeishuCode\(appId\)/,'OAuth helper must survive history loader edits');
 console.log('PASS six-turn history, progressive expansion, latest-click cancellation');
