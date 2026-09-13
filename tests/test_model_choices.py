@@ -176,6 +176,9 @@ class CloudTests(unittest.TestCase):
         _, expanded = self.request("GET", f"/api/thread/{thread_id}?turnLimit=12")
         self.assertEqual(len(expanded["thread"]["turns"]), 12)
         self.assertEqual(expanded["thread"]["turns"][0]["id"], "2")
+        _, complete = self.request("GET", f"/api/thread/{thread_id}?turnLimit=all")
+        self.assertEqual(len(complete["thread"]["turns"]), 14)
+        self.assertEqual(complete["thread"]["turns"][0]["id"], "0")
 
     def test_model_auth_and_queue_snapshot(self):
         self.assertEqual(self.request("GET", "/api/models", auth=None)[0], 401)

@@ -157,7 +157,8 @@ class H(BaseHTTPRequestHandler):
             row=db.execute('SELECT payload FROM threads WHERE id=?',(unquote(p.path.split('/api/thread/',1)[1]),)).fetchone()
             if not row:return self.json({'error':'对话尚未同步'},404)
             thread=json.loads(row[0]);turns=thread.get('turns') or [];total=len(turns);query=parse_qs(p.query)
-            try:limit=max(6,min(int((query.get('turnLimit') or ['6'])[0]),300))
+            requested=(query.get('turnLimit') or ['6'])[0]
+            try:limit=total if requested=='all' else max(6,min(int(requested),300))
             except ValueError:limit=6
             thread['turns']=turns[-limit:];thread['bridgeTotalTurns']=total;thread['bridgeVisibleTurns']=len(thread['turns'])
             return self.json({'thread':thread})

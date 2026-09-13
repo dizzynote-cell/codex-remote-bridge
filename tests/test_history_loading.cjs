@@ -5,8 +5,10 @@ for(const file of ['web/app.js','cloud/web/app.js']){
   assert.match(source,/turnLimit=\$\{limit\}/);
   assert.match(source,/threadController\.abort\(\)/);
   assert.match(source,/requestId!==threadRequestSerial\|\|selected!==id/);
-  assert.match(source,/Math\.min\(total,limit\+6\)/);
+  assert.match(source,/Math\.min\(total,Number\(limit\)\+6\)/);
   assert.match(source,/查看更早 6 轮/);
+  assert.match(source,/id="load-all-turns"[^>]*>查看全部/);
+  assert.match(source,/threadVisibleCounts\.set\(id,'all'\)/);
   assert.doesNotMatch(source,/async function loadThread\(id,silent=false\)\{if\(threadLoading\)return/);
 }
 // Only the hosted UI performs Feishu OAuth; local UI is authenticated by loopback access.

@@ -43,10 +43,11 @@ async function loadThread(id,silent=false,showOlder=false){
     els.meta.textContent=`项目：${projectName(t.cwd)} · ${t.status||'未知'} · ${total} 轮 · ID：${t.id||id}`;
     if(!silent||signature!==lastThreadSignature){
       const nearBottom=els.messages.scrollHeight-els.messages.scrollTop-els.messages.clientHeight<140,remaining=Math.max(0,total-visible);
-      const older=remaining?`<div class="older-turns-wrap"><button id="load-older-turns" type="button">查看更早 6 轮（还有 ${remaining} 轮）</button></div>`:'';
+      const older=remaining?`<div class="older-turns-wrap"><button id="load-older-turns" type="button">查看更早 6 轮（还有 ${remaining} 轮）</button><button id="load-all-turns" type="button">查看全部</button></div>`:'';
       els.messages.innerHTML=older+renderTurns(t.turns||[]);
-      const olderButton=document.querySelector('#load-older-turns');
-      if(olderButton)olderButton.onclick=()=>{threadVisibleCounts.set(id,Math.min(total,limit+6));loadThread(id,false,true);};
+      const olderButton=document.querySelector('#load-older-turns'),allButton=document.querySelector('#load-all-turns');
+      if(olderButton)olderButton.onclick=()=>{threadVisibleCounts.set(id,Math.min(total,Number(limit)+6));loadThread(id,false,true);};
+      if(allButton)allButton.onclick=()=>{threadVisibleCounts.set(id,'all');loadThread(id,false,true);};
       bindAttachmentButtons();
       if(showOlder)els.messages.scrollTop=0;else if(!silent||nearBottom)els.messages.scrollTop=els.messages.scrollHeight;
       lastThreadSignature=signature;

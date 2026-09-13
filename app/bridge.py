@@ -571,8 +571,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 turns = thread.get("turns") or []
                 total = len(turns)
                 query = parse_qs(parsed.query)
+                requested = query.get("turnLimit", ["6"])[0]
                 try:
-                    limit = max(6, min(int(query.get("turnLimit", ["6"])[0]), 300))
+                    limit = total if requested == "all" else max(6, min(int(requested), 300))
                 except ValueError:
                     limit = 6
                 thread["turns"] = turns[-limit:]
