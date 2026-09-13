@@ -2,7 +2,7 @@
 // Copyright (c) 2026 xiyannan
 // Project: Codex Remote Bridge
 const els={threads:document.querySelector('#threads'),search:document.querySelector('#search'),count:document.querySelector('#count'),title:document.querySelector('#title'),meta:document.querySelector('#meta'),messages:document.querySelector('#messages'),refresh:document.querySelector('#refresh'),mode:document.querySelector('#mode'),loadMore:document.querySelector('#load-more'),quota:document.querySelector('#quota'),quotaDetails:document.querySelector('#quota-details'),menu:document.querySelector('#menu'),backdrop:document.querySelector('#sidebar-backdrop'),authGate:document.querySelector('#auth-gate'),authMessage:document.querySelector('#auth-message'),authRetry:document.querySelector('#auth-retry')};
-let threads=[],selected=null,threadLoading=false,lastThreadSignature='',nextCursor=null;
+let threads=[],selected=null,threadLoading=false,lastThreadSignature='',nextCursor=null,threadVisibleCounts=new Map(),threadRequestSerial=0,threadController=null;
 const mobileDevice=/Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent)||navigator.maxTouchPoints>1&&Math.min(screen.width,screen.height)<900;
 document.body.classList.toggle('mobile-ui',mobileDevice);
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -22,8 +22,41 @@ function attachmentPaths(items){const found=[];for(const i of items){found.push(
 function renderAttachments(turn){const files=turn.bridgeAttachments||[];if(!files.length)return'';return`<section class="attachments"><div class="attachment-heading">返回的文件</div>${files.map(file=>{const path=file.agentDiskPath||file.localPath,ext=(file.name.split('.').pop()||'').toLowerCase(),src=`/api/attachment?path=${encodeURIComponent(path)}`,direct=file.delivery!=='local_only',preview=direct&&imageExtensions.has(ext)?`<a href="${src}" target="_blank" rel="noopener"><img class="attachment-preview" src="${src}" alt="${esc(file.name)}" loading="lazy"></a>`:'',location=file.delivery==='agent_disk'?`Agent Disk：${path}`:`本机文件：${path}`,actions=direct?`<div class="attachment-actions"><a href="${src}" target="_blank" rel="noopener">查看 / 下载</a><button data-open-path="${esc(path)}">本机打开</button></div>`:`<div class="attachment-actions"><button data-open-path="${esc(path)}">本机打开</button></div>`;return`<div class="attachment-card">${preview}<div class="attachment-info"><strong>${esc(file.name)}</strong><span>${esc(location)}</span><span>${esc(file.reason||'')}</span></div>${actions}</div>`;}).join('')}</section>`;}
 function bindAttachmentButtons(){document.querySelectorAll('[data-open-path]').forEach(b=>b.onclick=async()=>{const original=b.textContent;b.disabled=true;b.textContent='正在打开…';try{const r=await fetch(`/api/open-attachment?path=${encodeURIComponent(b.dataset.openPath)}`);if(!r.ok)throw new Error();b.textContent='已打开';}catch{b.textContent='文件不存在';}setTimeout(()=>{b.disabled=false;b.textContent=original;},1800);} );}
 function renderTurns(turns){if(!turns.length)return'<div class="empty"><h3>暂无历史</h3><p>从飞书向该对话发送第一条消息。</p></div>';return turns.map(turn=>{const items=turn.items||[],user=items.find(x=>x.type==='userMessage'),agents=items.filter(x=>x.type==='agentMessage'),final=[...agents].reverse().find(x=>x.phase!=='commentary'),middle=items.filter(x=>x!==user&&x!==final).map(renderItem).join(''),answer=itemText(final)||(agents.length?itemText(agents.at(-1)):'（尚无最终回答）');return`<article class="turn"><div class="user"><div class="label">你</div><div class="bubble">${esc(itemText(user)||'（非文字输入）')}</div></div>${middle}<div class="assistant"><div class="label">Codex · ${esc(window.modelPicker?.label(turn)||'模型未记录')}</div><div class="bubble">${esc(answer)}</div></div>${renderAttachments(turn)}</article>`;}).join('');}
-async function loadThread(id,silent=false){if(threadLoading)return;threadLoading=true;selected=id;window.modelPicker?.begin(id);renderThreads();if(!silent)els.messages.innerHTML='<div class="loading">正在读取完整历史…</div>';try{const data=await(await fetch(`/api/thread/${encodeURIComponent(id)}`)).json();if(data.error){if(!silent)els.messages.innerHTML=`<div class="loading">${esc(data.error)}</div>`;return;}window.modelPicker?.thread(data.thread);const t=data.thread,signature=JSON.stringify((t.turns||[]).map(turn=>[turn.id,turn.status,turn.bridgeModel,(turn.items||[]).length]));els.title.textContent=t.name||'未命名对话';els.meta.textContent=`项目：${projectName(t.cwd)} · ${t.status||'未知'} · ${(t.turns||[]).length} 轮 · ID：${t.id||id}`;if(!silent||signature!==lastThreadSignature){const nearBottom=els.messages.scrollHeight-els.messages.scrollTop-els.messages.clientHeight<140;els.messages.innerHTML=renderTurns(t.turns||[]);bindAttachmentButtons();if(!silent||nearBottom)els.messages.scrollTop=els.messages.scrollHeight;lastThreadSignature=signature;}}finally{threadLoading=false;}}
-function requestFeishuCode(appId){return new Promise((resolve,reject)=>{if(!window.tt?.requestAccess){reject(new Error('请从飞书工作台打开网页应用'));return;}window.tt.requestAccess({appID:appId,scopeList:[],success:r=>resolve(r.code),fail:r=>reject(new Error(r?.errMsg||'飞书授权失败'))});});}
+async function loadThread(id,silent=false,showOlder=false){
+  if(silent&&threadLoading&&selected===id)return;
+  const switching=selected!==id;
+  if(switching&&!threadVisibleCounts.has(id))threadVisibleCounts.set(id,6);
+  const limit=threadVisibleCounts.get(id)||6;
+  if(threadController)threadController.abort();
+  const controller=new AbortController(),requestId=++threadRequestSerial;
+  threadController=controller;threadLoading=true;selected=id;window.modelPicker?.begin(id);renderThreads();
+  if(!silent)els.messages.innerHTML='<div class="loading">正在读取最近对话…</div>';
+  try{
+    const response=await fetch(`/api/thread/${encodeURIComponent(id)}?turnLimit=${limit}`,{signal:controller.signal,cache:'no-store'});
+    const data=await response.json();
+    if(requestId!==threadRequestSerial||selected!==id)return;
+    if(data.error){if(!silent)els.messages.innerHTML=`<div class="loading">${esc(data.error)}</div>`;return;}
+    window.modelPicker?.thread(data.thread);
+    const t=data.thread,total=Number(t.bridgeTotalTurns??(t.turns||[]).length),visible=(t.turns||[]).length;
+    const signature=JSON.stringify([total,visible,(t.turns||[]).map(turn=>[turn.id,turn.status,turn.bridgeModel,(turn.items||[]).length])]);
+    els.title.textContent=t.name||'未命名对话';
+    els.meta.textContent=`项目：${projectName(t.cwd)} · ${t.status||'未知'} · ${total} 轮 · ID：${t.id||id}`;
+    if(!silent||signature!==lastThreadSignature){
+      const nearBottom=els.messages.scrollHeight-els.messages.scrollTop-els.messages.clientHeight<140,remaining=Math.max(0,total-visible);
+      const older=remaining?`<div class="older-turns-wrap"><button id="load-older-turns" type="button">查看更早 6 轮（还有 ${remaining} 轮）</button></div>`:'';
+      els.messages.innerHTML=older+renderTurns(t.turns||[]);
+      const olderButton=document.querySelector('#load-older-turns');
+      if(olderButton)olderButton.onclick=()=>{threadVisibleCounts.set(id,Math.min(total,limit+6));loadThread(id,false,true);};
+      bindAttachmentButtons();
+      if(showOlder)els.messages.scrollTop=0;else if(!silent||nearBottom)els.messages.scrollTop=els.messages.scrollHeight;
+      lastThreadSignature=signature;
+    }
+  }catch(error){
+    if(error.name!=='AbortError'&&!silent)els.messages.innerHTML='<div class="loading">读取失败，请重试</div>';
+  }finally{
+    if(requestId===threadRequestSerial){threadLoading=false;threadController=null;}
+  }
+}
 async function authenticate(){els.authGate.hidden=false;els.authRetry.hidden=true;els.authMessage.textContent='正在连接飞书并确认身份…';try{const config=await(await fetch('/api/auth/config',{cache:'no-store'})).json();if(!config.authRequired||config.authenticated){els.authGate.hidden=true;return true;}if(!config.ownerConfigured)throw new Error('桥尚未绑定所有者，请先在机器人单聊中发送一条消息');const code=await requestFeishuCode(config.appId);const response=await fetch('/api/auth/feishu',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code})});const result=await response.json();if(!response.ok)throw new Error(result.error==='owner_mismatch'?'当前飞书账号不是桥的所有者':(result.message||'身份验证失败'));els.authGate.hidden=true;return true;}catch(error){els.authMessage.textContent=error.message||'身份验证失败';els.authRetry.hidden=false;return false;}}
 async function boot(){if(!await authenticate())return;loadThreads();loadStatus();loadQuota();setInterval(()=>loadThreads(false),30000);setInterval(loadStatus,5000);setInterval(loadQuota,60000);setInterval(()=>{if(selected)loadThread(selected,true);},3000);}
 els.authRetry.onclick=boot;els.menu.onclick=()=>document.body.classList.add('sidebar-open');els.backdrop.onclick=()=>document.body.classList.remove('sidebar-open');els.search.oninput=renderThreads;els.refresh.onclick=()=>{loadThreads();if(selected)loadThread(selected,true);};els.loadMore.onclick=()=>loadThreads(true);boot();

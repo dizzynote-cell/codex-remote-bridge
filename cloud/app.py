@@ -155,7 +155,12 @@ class H(BaseHTTPRequestHandler):
             return self.json({'threads':[{'id':r[0],'name':r[1] or '未命名对话','cwd':r[2],'hiddenAt':r[3]} for r in rows]})
         if p.path.startswith('/api/thread/'):
             row=db.execute('SELECT payload FROM threads WHERE id=?',(unquote(p.path.split('/api/thread/',1)[1]),)).fetchone()
-            return self.json({'thread':json.loads(row[0])} if row else {'error':'对话尚未同步'},200 if row else 404)
+            if not row:return self.json({'error':'对话尚未同步'},404)
+            thread=json.loads(row[0]);turns=thread.get('turns') or [];total=len(turns);query=parse_qs(p.query)
+            try:limit=max(6,min(int((query.get('turnLimit') or ['6'])[0]),300))
+            except ValueError:limit=6
+            thread['turns']=turns[-limit:];thread['bridgeTotalTurns']=total;thread['bridgeVisibleTurns']=len(thread['turns'])
+            return self.json({'thread':thread})
         if p.path=='/api/status':
             row=db.execute("SELECT value FROM meta WHERE key='heartbeat'").fetchone(); ts=int(row[0]) if row else 0; online=time.time()-ts<75
             runtime_row=db.execute("SELECT value FROM meta WHERE key='runtime'").fetchone();runtime=json.loads(runtime_row[0]) if runtime_row else {};working=bool(runtime.get('working')) if online else False

@@ -160,6 +160,23 @@ class CloudTests(unittest.TestCase):
         conn.close()
         return result
 
+    def test_thread_history_defaults_to_six_and_expands(self):
+        thread_id = "22222222-2222-4222-8222-222222222222"
+        payload = {"id": thread_id, "name": "long", "turns": [{"id": str(i)} for i in range(14)]}
+        raw = json.dumps(payload)
+        self.env["db"].execute(
+            "INSERT OR REPLACE INTO threads VALUES(?,?,?,?,?,?,?,?,?)",
+            (thread_id, "long", "", "completed", "", "", raw, "hash", int(time.time())),
+        )
+        self.env["db"].commit()
+        code, result = self.request("GET", f"/api/thread/{thread_id}")
+        self.assertEqual(code, 200)
+        self.assertEqual([t["id"] for t in result["thread"]["turns"]], [str(i) for i in range(8, 14)])
+        self.assertEqual(result["thread"]["bridgeTotalTurns"], 14)
+        _, expanded = self.request("GET", f"/api/thread/{thread_id}?turnLimit=12")
+        self.assertEqual(len(expanded["thread"]["turns"]), 12)
+        self.assertEqual(expanded["thread"]["turns"][0]["id"], "2")
+
     def test_model_auth_and_queue_snapshot(self):
         self.assertEqual(self.request("GET", "/api/models", auth=None)[0], 401)
         self.assertEqual(self.request("POST", "/api/model-choice", {}, auth=None)[0], 401)

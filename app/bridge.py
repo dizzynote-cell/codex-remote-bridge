@@ -568,6 +568,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if parsed.path.startswith("/api/thread/"):
                 thread_id = parsed.path.removeprefix("/api/thread/")
                 thread = enrich_thread_attachments(read_thread(thread_id), False)
+                turns = thread.get("turns") or []
+                total = len(turns)
+                query = parse_qs(parsed.query)
+                try:
+                    limit = max(6, min(int(query.get("turnLimit", ["6"])[0]), 300))
+                except ValueError:
+                    limit = 6
+                thread["turns"] = turns[-limit:]
+                thread["bridgeTotalTurns"] = total
+                thread["bridgeVisibleTurns"] = len(thread["turns"])
                 self.send_json({"thread": thread})
                 return
             if parsed.path in {"/", "/index.html"}:
