@@ -179,6 +179,9 @@ class H(BaseHTTPRequestHandler):
         if not f.is_file() or WEB.resolve() not in f.parents:return self.send_error(404)
         b=f.read_bytes(); ct={'.html':'text/html','.js':'application/javascript','.css':'text/css'}.get(f.suffix,'application/octet-stream'); self.send_response(200); self.send_header('Content-Type',ct+'; charset=utf-8'); self.send_header('Cache-Control','no-cache, no-store, must-revalidate'); self.send_header('Pragma','no-cache'); self.send_header('Expires','0'); self.send_header('Content-Length',str(len(b))); self.end_headers(); self.wfile.write(b)
     def do_POST(self):
+        with DB_LOCK:
+            return self._do_POST()
+    def _do_POST(self):
         p=urlparse(self.path); n=min(int(self.headers.get('Content-Length') or 0),24*1024*1024); body=self.rfile.read(n)
         if p.path=='/api/device/heartbeat':
             if not secrets.compare_digest(self.headers.get('Authorization') or '',f'Bearer {SYNC_TOKEN}'):return self.json({'error':'unauthorized'},401)
@@ -266,6 +269,7 @@ class H(BaseHTTPRequestHandler):
         self.send_error(404)
     def log_message(self,*_):pass
 import history_store
-HISTORY_LOCK=__import__('threading').RLock()
+DB_LOCK=__import__('threading').RLock()
+HISTORY_LOCK=DB_LOCK
 history_store.initialize(db)
 ThreadingHTTPServer(('127.0.0.1',8780),H).serve_forever()
