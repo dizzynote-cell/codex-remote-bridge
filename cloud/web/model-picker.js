@@ -17,7 +17,7 @@
   const defaultEffort=id=>id===defaults.model?defaults.effort||entry(id)?.defaultReasoningEffort:entry(id)?.defaultReasoningEffort;
   const label=turn=>{
     const record=turn?.bridgeModel,m=turn?.model||record?.actual||record?.requested;
-    return m?m+' · '+(names[record?.effort]||record?.effort||'强度未记录')+(record?.requested&&!record.actual?'（请求设置）':''):'模型未记录';
+    return m?m+' · '+(names[record?.effort]||record?.effort||'强度未记录'):'模型未记录';
   };
   function merge(incoming){for(const [id,value] of Object.entries(incoming||{})){if(value&&value.updated>(choices[id]?.updated||0))choices[id]=value;}}
   function fill(target,items,value){
