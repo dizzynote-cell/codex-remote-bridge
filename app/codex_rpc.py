@@ -28,6 +28,7 @@ class CodexRpc:
             creationflags=subprocess.CREATE_NO_WINDOW,
         )
         self._next_id = 1
+        self._write_lock = threading.Lock()
         self._responses = {}
         self._condition = threading.Condition()
         threading.Thread(target=self._read_stdout, daemon=True).start()
@@ -57,11 +58,12 @@ class CodexRpc:
             pass
 
     def call(self, method, params, timeout=30):
-        request_id = str(self._next_id)
-        self._next_id += 1
-        payload = {"id": request_id, "method": method, "params": params}
-        self.process.stdin.write(json.dumps(payload, ensure_ascii=False) + "\n")
-        self.process.stdin.flush()
+        with self._write_lock:
+            request_id = str(self._next_id)
+            self._next_id += 1
+            payload = {"id": request_id, "method": method, "params": params}
+            self.process.stdin.write(json.dumps(payload, ensure_ascii=False) + "\n")
+            self.process.stdin.flush()
         deadline = time.monotonic() + timeout
         with self._condition:
             while request_id not in self._responses:

@@ -135,8 +135,7 @@ def bridge_mode() -> dict:
 
 
 def account_quota() -> dict:
-    with codex_lock:
-        result = codex_rpc.call("account/rateLimits/read", {})
+    result = codex_rpc.call("account/rateLimits/read", {}, timeout=10)
     snapshot = result.get("rateLimits") or {}
     primary = snapshot.get("primary") or {}
     used = max(0, min(100, int(primary.get("usedPercent") or 0)))
@@ -771,15 +770,18 @@ def execute_local_web_task(task_id: str, thread_id: str, text: str, files: list,
                         break
             if active_turn_id:
                 try:
-                    codex_rpc.call("turn/steer", {"threadId": thread_id, "expectedTurnId": active_turn_id, "input": codex_input})
-                    set_local_web_task(task_id, status="completed", message="已作为补充引导追加", turnId=active_turn_id, steered=True)
+                    codex_rpc.call("turn/steer", {"threadId": thread_id, "expectedTurnId": active_turn_id,
+                                                   "input": codex_input})
+                    set_local_web_task(task_id, status="completed", message="已作为补充引导追加",
+                                       turnId=active_turn_id, steered=True)
                     return
                 except RuntimeError:
                     if active_turns.get(thread_id) == active_turn_id:
                         active_turns.pop(thread_id, None)
             before = read_thread(thread_id)
             previous_turn_ids = {turn.get("id") for turn in before.get("turns", [])}
-            codex_rpc.call("thread/resume", {"threadId": thread_id, "sandbox": "danger-full-access", "approvalPolicy": "never"})
+            codex_rpc.call("thread/resume", {"threadId": thread_id, "sandbox": "danger-full-access",
+                                             "approvalPolicy": "never"})
             result = model_choices.start(thread_id, codex_input, requested_model, effort=requested_effort)
             turn_id = (result.get("turn") or {}).get("id")
             if turn_id:
@@ -792,21 +794,33 @@ def execute_local_web_task(task_id: str, thread_id: str, text: str, files: list,
             thread = read_thread(thread_id)
             target = next((item for item in reversed(thread.get("turns", [])) if item.get("id") == turn_id), None)
             if target is None:
-                target = next((item for item in reversed(thread.get("turns", [])) if item.get("id") not in previous_turn_ids), None)
+                target = next((item for item in reversed(thread.get("turns", []))
+                               if item.get("id") not in previous_turn_ids), None)
             if not target:
                 continue
             status = target.get("status")
             status_name = status.get("type") if isinstance(status, dict) else status
             progress = turn_progress_summary(target)
             if progress and progress != last_progress:
-                set_local_web_task(task_id, status="running", message=f"Codex 正在处理\n\n{progress[:12000]}", turnId=turn_id)
+                set_local_web_task(task_id, status="running", message=f"Codex 正在处理\n\n{progress[:12000]}",
+                                   turnId=turn_id)
                 last_progress = progress
             if status_name in {"completed", "failed", "interrupted", "cancelled"}:
+                from turn_state import successor, message as terminal_message
+                next_turn = successor(thread, target)
+                if next_turn:
+                    with codex_lock:
+                        if active_turns.get(thread_id) == turn_id:
+                            active_turns[thread_id] = next_turn['id']
+                    turn_id = next_turn['id']
+                    set_local_web_task(task_id, status="running", message="上一轮已结束，正在跟进后续回合", turnId=turn_id)
+                    continue
                 with codex_lock:
                     if active_turns.get(thread_id) == turn_id:
                         active_turns.pop(thread_id, None)
-                set_local_web_task(task_id, status="completed" if status_name == "completed" else "failed",
-                                   message="任务已完成" if status_name == "completed" else f"任务已结束：{status_name}", turnId=turn_id)
+                set_local_web_task(task_id, status=status_name,
+                                   message=terminal_message(target),
+                                   turnId=turn_id)
                 return
         raise RuntimeError("Codex 执行超过30分钟")
     except Exception as error:
@@ -822,74 +836,8 @@ def start_dashboard():
 
 
 def sync_cloud_history() -> None:
-    """Push text-only Codex history to the isolated cloud viewer."""
-    url = (os.getenv("CODEX_HISTORY_URL") or "").strip()
-    token = (os.getenv("CODEX_HISTORY_SYNC_TOKEN") or "").strip()
-    ssh_host = (os.getenv("CODEX_HISTORY_SSH_HOST") or "").strip()
-    ssh_key = (os.getenv("CODEX_HISTORY_SSH_KEY") or "").strip()
-    if not url or not token:
-        return
-    last_hashes = {}
-    cached_quota = None
-    next_quota_read = 0.0
-    while True:
-        try:
-            page = list_threads_page(50, None)
-            changed = []
-            pending_hashes = {}
-            detected_working = False
-            detected_thread_ids = []
-            for summary in page.get("data", []):
-                thread_id = summary.get("id")
-                if not thread_id:
-                    continue
-                thread = enrich_thread_attachments(read_thread(thread_id), True)
-                for turn in thread.get("turns", []):
-                    turn_status = turn.get("status")
-                    turn_status = turn_status.get("type") if isinstance(turn_status, dict) else turn_status
-                    if turn_status in {"inProgress", "in_progress", "running", "active", "started"}:
-                        detected_working = True
-                        detected_thread_ids.append(thread_id)
-                        break
-                raw = json.dumps(thread, ensure_ascii=False, sort_keys=True, default=str)
-                digest = __import__("hashlib").sha256(raw.encode("utf-8")).hexdigest()
-                if last_hashes.get(thread_id) != digest:
-                    changed.append(thread)
-                    pending_hashes[thread_id] = digest
-            if time.monotonic() >= next_quota_read:
-                try:
-                    fresh_quota = account_quota()
-                    if fresh_quota.get("available"):
-                        cached_quota = fresh_quota
-                    next_quota_read = time.monotonic() + 300
-                except Exception as quota_error:
-                    log(f"额度读取暂时失败，继续使用缓存：{quota_error}")
-                    next_quota_read = time.monotonic() + 60
-            payload = {"threads": changed, "quota": cached_quota}
-            try:
-                response = http.post(url, headers={"Authorization": f"Bearer {token}"}, json=payload, timeout=(10, 60))
-                response.raise_for_status()
-            except Exception as https_error:
-                if not (ssh_host and ssh_key):
-                    raise
-                log(f"HTTPS 历史同步暂时失败，改用 SSH 备用通道：{https_error}")
-                result = subprocess.run(
-                    ["ssh", "-i", ssh_key, "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
-                     ssh_host, "python3 /opt/codex-history/import_sync.py"],
-                    input=json.dumps(payload, ensure_ascii=False), text=True, capture_output=True,
-                    encoding="utf-8", errors="replace", timeout=90,
-                    creationflags=subprocess.CREATE_NO_WINDOW,
-                )
-                if result.returncode != 0:
-                    raise RuntimeError(result.stderr.strip() or f"SSH 同步退出码 {result.returncode}")
-            last_hashes.update(pending_hashes)
-            cloud_runtime_state.update(last_history_sync=time.time(), last_error="",
-                                       detected_working=detected_working,
-                                       detected_thread_ids=detected_thread_ids, detected_at=time.time())
-        except Exception as error:
-            cloud_runtime_state["last_error"] = str(error)[:300]
-            log(f"云端只读历史同步失败：{error}")
-        time.sleep(2 if active_turns else 5)
+    from history_sync import run
+    return run(globals())
 
 
 def cloud_base_url() -> str:
@@ -1073,9 +1021,17 @@ def execute_cloud_task(task: dict) -> None:
                     if active_turns.get(thread_id) == turn_id:
                         active_turns.pop(thread_id, None)
                 _, answer = turn_pair(target)
-                final_status = "completed" if status_name == "completed" else "failed"
+                from turn_state import successor, message as terminal_message
+                next_turn = successor(thread,target)
+                if next_turn:
+                    with codex_lock:
+                        active_turns.setdefault(thread_id,next_turn['id'])
+                    turn_id = next_turn['id']
+                    cloud_task_report(task_id,"started",{"message":"正在跟进后续回合","turnId":turn_id},"running")
+                    continue
+                final_status = status_name
                 cloud_task_report(task_id, "final", {"answer": answer, "turnId": turn_id,
-                                  "codexStatus": status_name}, final_status, result=answer,
+                                  "codexStatus": status_name,"message":terminal_message(target)}, final_status, result=answer,
                                   error=None if final_status == "completed" else status_name)
                 return
         raise RuntimeError("Codex 执行超过30分钟")

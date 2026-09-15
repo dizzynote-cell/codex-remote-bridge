@@ -148,20 +148,18 @@ class H(BaseHTTPRequestHandler):
             rows=db.execute('SELECT id,kind,payload,created_at FROM task_events WHERE task_id=? AND id>? ORDER BY id',(task_id,after)).fetchall()
             return self.json({'events':[{'id':r[0],'kind':r[1],'payload':json.loads(r[2]),'createdAt':r[3]} for r in rows]})
         if p.path=='/api/threads':
-            rows=db.execute('SELECT id,name,cwd,status,preview,updated_at,synced_at FROM threads WHERE id NOT IN (SELECT thread_id FROM hidden_threads) ORDER BY synced_at DESC').fetchall()
+            rows=db.execute('SELECT id,name,cwd,status,preview,updated_at,synced_at FROM threads WHERE id NOT IN (SELECT thread_id FROM hidden_threads) ORDER BY CAST(updated_at AS REAL) DESC').fetchall()
             return self.json({'threads':[{'id':r[0],'name':r[1],'cwd':r[2],'status':r[3],'preview':r[4],'updatedAt':r[5],'syncedAt':r[6]} for r in rows],'nextCursor':None})
         if p.path=='/api/threads/hidden':
             rows=db.execute('SELECT t.id,t.name,t.cwd,h.hidden_at FROM hidden_threads h LEFT JOIN threads t ON t.id=h.thread_id ORDER BY h.hidden_at DESC').fetchall()
             return self.json({'threads':[{'id':r[0],'name':r[1] or '未命名对话','cwd':r[2],'hiddenAt':r[3]} for r in rows]})
         if p.path.startswith('/api/thread/'):
-            row=db.execute('SELECT payload FROM threads WHERE id=?',(unquote(p.path.split('/api/thread/',1)[1]),)).fetchone()
-            if not row:return self.json({'error':'对话尚未同步'},404)
-            thread=json.loads(row[0]);turns=thread.get('turns') or [];total=len(turns);query=parse_qs(p.query)
-            requested=(query.get('turnLimit') or ['6'])[0]
-            try:limit=total if requested=='all' else max(6,min(int(requested),300))
-            except ValueError:limit=6
-            thread['turns']=turns[-limit:];thread['bridgeTotalTurns']=total;thread['bridgeVisibleTurns']=len(thread['turns'])
-            return self.json({'thread':thread})
+            query=parse_qs(p.query)
+            try:
+                with HISTORY_LOCK:
+                    result=history_store.read(db,unquote(p.path.split('/api/thread/',1)[1]),(query.get('turnLimit') or ['6'])[0],(query.get('refresh') or ['0'])[0]=='1')
+                return self.json(result or {'error':'对话尚未同步'},200 if result else 404)
+            except ValueError:return self.json({'error':'invalid_turn_limit'},400)
         if p.path=='/api/status':
             row=db.execute("SELECT value FROM meta WHERE key='heartbeat'").fetchone(); ts=int(row[0]) if row else 0; online=time.time()-ts<75
             runtime_row=db.execute("SELECT value FROM meta WHERE key='runtime'").fetchone();runtime=json.loads(runtime_row[0]) if runtime_row else {};working=bool(runtime.get('working')) if online else False
@@ -173,7 +171,7 @@ class H(BaseHTTPRequestHandler):
             history_row=db.execute("SELECT value FROM meta WHERE key='history_sync'").fetchone();history_ts=int(history_row[0]) if history_row else 0;history_stale=bool(online and time.time()-history_ts>120)
             notice_row=db.execute("SELECT value FROM meta WHERE key='service_notice'").fetchone(); notice=json.loads(notice_row[0]) if notice_row else None
             if notice and notice.get('state')=='restarting' and int(notice.get('until') or 0)>time.time():return self.json({'mode':'restarting','online':online,'label':'服务即将重启','seconds':max(1,int(notice['until']-time.time()))})
-            label='服务中断，请检查主机状态' if not online else ('PC 在线 · 历史同步暂时延迟' if history_stale else 'PC 在线 · 同步正常')
+            label='服务中断，请检查主机状态' if not online else ('PC 在线 · 历史同步暂时延迟' if history_stale else 'PC 在线 · 同步通道已连接')
             return self.json({'mode':'mobile' if online else 'offline','online':online,'working':working,'activeCount':len(active_threads) if active_threads else (1 if working else 0),'activeThreads':active_threads,'historyStale':history_stale,'desktopRunning':online,'label':label})
         if p.path=='/api/quota':
             row=db.execute("SELECT value FROM meta WHERE key='quota'").fetchone(); return self.json(json.loads(row[0]) if row else {'available':False})
@@ -196,15 +194,9 @@ class H(BaseHTTPRequestHandler):
             path=UPLOADS/f'output-{file_id}{Path(name).suffix.lower()}';path.write_bytes(body);now=int(time.time());db.execute('INSERT OR REPLACE INTO output_files VALUES(?,?,?,?,?,?,?)',(file_id,Path(name).name,mime,len(body),str(path),now,now+7*86400));db.commit();return self.json({'ok':True,'fileId':file_id,'expiresAt':now+7*86400})
         if p.path=='/api/sync':
             if not secrets.compare_digest(self.headers.get('Authorization') or '',f'Bearer {SYNC_TOKEN}'):return self.json({'error':'unauthorized'},401)
-            data=json.loads(body); now=int(time.time())
-            for t in data.get('threads',[]):
-                raw=json.dumps(t,ensure_ascii=False,separators=(',',':')); h=hashlib.sha256(raw.encode()).hexdigest()
-                db.execute('INSERT INTO threads VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,cwd=excluded.cwd,status=excluded.status,preview=excluded.preview,updated_at=excluded.updated_at,payload=excluded.payload,content_hash=excluded.content_hash,synced_at=excluded.synced_at',(str(t['id']),text_value(t.get('name')),text_value(t.get('cwd')),text_value(t.get('status')),text_value(t.get('preview')),text_value(t.get('updatedAt')),raw,h,now))
-            db.execute("INSERT INTO meta VALUES('heartbeat',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(str(now),))
-            db.execute("INSERT INTO meta VALUES('history_sync',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(str(now),))
-            db.execute("DELETE FROM meta WHERE key='service_notice'")
-            if data.get('quota') is not None:db.execute("INSERT INTO meta VALUES('quota',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(json.dumps(data['quota']),))
-            db.commit(); return self.json({'ok':True,'count':len(data.get('threads',[]))})
+            with HISTORY_LOCK:
+                result=history_store.ingest(db,json.loads(body))
+            return self.json(result)
         if p.path=='/api/device/status':
             if not secrets.compare_digest(self.headers.get('Authorization') or '',f'Bearer {SYNC_TOKEN}'):return self.json({'error':'unauthorized'},401)
             data=json.loads(body or b'{}'); now=int(time.time()); state=str(data.get('state') or '')
@@ -273,4 +265,7 @@ class H(BaseHTTPRequestHandler):
             return self.json({'ok':True},cookie=self.new_session())
         self.send_error(404)
     def log_message(self,*_):pass
+import history_store
+HISTORY_LOCK=__import__('threading').RLock()
+history_store.initialize(db)
 ThreadingHTTPServer(('127.0.0.1',8780),H).serve_forever()
