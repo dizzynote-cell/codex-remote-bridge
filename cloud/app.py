@@ -335,7 +335,7 @@ class H(BaseHTTPRequestHandler):
                 return self.json({'error':'voice_disabled'},403)
             cfg=db.execute("SELECT value FROM meta WHERE key='voice_config'").fetchone()
             cfg=json.loads(cfg[0]) if cfg else {}
-            expected=hashlib.sha256(json.dumps([text,cfg.get('voice') or '',cfg.get('resource') or '','v3-sse-mp3'],ensure_ascii=False,separators=(',',':')).encode()).hexdigest()
+            expected=hashlib.sha256(json.dumps([text,cfg.get('voice') or '',cfg.get('resource') or '','v3-sse-mp3-rate25'],ensure_ascii=False,separators=(',',':')).encode()).hexdigest()
             if not cfg.get('configured') or expected!=key or not voice_authorized(thread_id,text):
                 return self.json({'error':'voice_reply_not_finalized_or_config_changed'},400)
             if voice_present(key):return self.json({'cached':True,'key':key})

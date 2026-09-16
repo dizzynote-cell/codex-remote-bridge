@@ -28,7 +28,7 @@
     return data;
   }
   async function digest(text){
-    const payload=JSON.stringify([text,config.voice,config.resource,'v3-sse-mp3']);
+    const payload=JSON.stringify([text,config.voice,config.resource,'v3-sse-mp3-rate25']);
     const bytes=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(payload));
     return [...new Uint8Array(bytes)].map(n=>n.toString(16).padStart(2,'0')).join('');
   }

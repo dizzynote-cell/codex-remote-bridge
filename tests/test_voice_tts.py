@@ -15,7 +15,7 @@ class VoiceCacheTests(unittest.TestCase):
         config = {"voice": "voice-example", "resource": "resource-example"}
         text = "你好，Codex"
         expected = hashlib.sha256(json.dumps(
-            [text, config["voice"], config["resource"], "v3-sse-mp3"],
+            [text, config["voice"], config["resource"], "v3-sse-mp3-rate25"],
             ensure_ascii=False, separators=(",", ":")
         ).encode("utf-8")).hexdigest()
         self.assertEqual(voice_tts.key(text, config), expected)

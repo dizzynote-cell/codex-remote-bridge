@@ -31,7 +31,7 @@ def settings(root: Path) -> dict:
 
 
 def key(text: str, config: dict) -> str:
-    payload = json.dumps([text, config["voice"], config["resource"], "v3-sse-mp3"], ensure_ascii=False,separators=(",",":"))
+    payload = json.dumps([text, config["voice"], config["resource"], "v3-sse-mp3-rate25"], ensure_ascii=False,separators=(",",":"))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -100,7 +100,7 @@ def synthesize(text: str, cache: Path, config: dict) -> tuple[str, Path]:
                      "X-Api-Request-Id": str(uuid.uuid4()), "Content-Type": "application/json"},
             json={"user": {"uid": "codex-bridge"}, "req_params": {
                 "text": text, "speaker": config["voice"],
-                "audio_params": {"format": "mp3", "bit_rate": 64000}}},
+                "audio_params": {"format": "mp3", "bit_rate": 64000, "speech_rate": 25}}},
             stream=True, timeout=(10, 120),
         ) as response:
             response.raise_for_status()
