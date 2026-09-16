@@ -1,4 +1,5 @@
 config/.env
+config/voiceapi.env
 data/
 logs/
 node_modules/

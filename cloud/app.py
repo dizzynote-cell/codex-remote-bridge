@@ -19,6 +19,56 @@ db=sqlite3.connect(DB,check_same_thread=False)
 db.execute('PRAGMA journal_mode=WAL'); db.execute('PRAGMA busy_timeout=5000')
 db.executescript('''CREATE TABLE IF NOT EXISTS threads(id TEXT PRIMARY KEY,name TEXT,cwd TEXT,status TEXT,preview TEXT,updated_at TEXT,payload TEXT NOT NULL,content_hash TEXT NOT NULL,synced_at INTEGER NOT NULL);CREATE INDEX IF NOT EXISTS idx_threads_synced_at ON threads(synced_at DESC);CREATE TABLE IF NOT EXISTS hidden_threads(thread_id TEXT PRIMARY KEY,hidden_at INTEGER NOT NULL);CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);CREATE TABLE IF NOT EXISTS tasks(id TEXT PRIMARY KEY,op TEXT NOT NULL,thread_id TEXT,title TEXT,cwd TEXT,text TEXT,source TEXT NOT NULL,status TEXT NOT NULL,created_at INTEGER NOT NULL,claimed_at INTEGER,updated_at INTEGER NOT NULL,result TEXT,error TEXT);CREATE INDEX IF NOT EXISTS idx_tasks_status_created ON tasks(status,created_at);CREATE TABLE IF NOT EXISTS task_events(id INTEGER PRIMARY KEY AUTOINCREMENT,task_id TEXT NOT NULL,kind TEXT NOT NULL,payload TEXT NOT NULL,created_at INTEGER NOT NULL);CREATE INDEX IF NOT EXISTS idx_task_events_task ON task_events(task_id,id);CREATE TABLE IF NOT EXISTS task_files(id TEXT PRIMARY KEY,task_id TEXT NOT NULL,name TEXT NOT NULL,mime TEXT,size INTEGER NOT NULL,path TEXT NOT NULL,created_at INTEGER NOT NULL);CREATE INDEX IF NOT EXISTS idx_task_files_task ON task_files(task_id);'''); db.commit()
 db.execute('CREATE TABLE IF NOT EXISTS output_files(id TEXT PRIMARY KEY,name TEXT NOT NULL,mime TEXT,size INTEGER NOT NULL,path TEXT NOT NULL,created_at INTEGER NOT NULL,expires_at INTEGER NOT NULL)');db.commit()
+db.execute('CREATE TABLE IF NOT EXISTS voice_cache(key TEXT PRIMARY KEY,size INTEGER NOT NULL,path TEXT NOT NULL,created_at INTEGER NOT NULL,expires_at INTEGER NOT NULL,last_used INTEGER NOT NULL)');db.commit()
+VOICE_DIR=DB.parent/'voice-cache';VOICE_DIR.mkdir(parents=True,exist_ok=True)
+VOICE_LOCK=__import__('threading').RLock()
+VOICE_LIMIT=5*1024**3;VOICE_TRIGGER=int(4.5*1024**3);VOICE_TARGET=3*1024**3
+VOICE_SCHEDULE_TRIGGER=3*1024**3;VOICE_SCHEDULE_TARGET=int(2.5*1024**3)
+def voice_key(value):
+    return bool(re.fullmatch(r'[0-9a-f]{64}',str(value or '')))
+def voice_present(value):
+    if not voice_key(value):return False
+    row=db.execute('SELECT path,expires_at FROM voice_cache WHERE key=?',(value,)).fetchone()
+    return bool(row and row[1]>time.time() and Path(row[0]).is_file())
+def voice_authorized(thread_id,text):
+    rows=[r[0] for r in db.execute('SELECT payload FROM threads WHERE id=?',(thread_id,)).fetchall()]
+    rows += [r[0] for r in db.execute('SELECT payload FROM history_windows WHERE thread_id=?',(thread_id,)).fetchall()]
+    for raw in rows:
+        for turn in (json.loads(raw).get('turns') or []):
+            if turn.get('status')!='completed':continue
+            for item in turn.get('items') or []:
+                if item.get('type')=='agentMessage' and item.get('phase')!='commentary' and str(item.get('text') or '').strip()==text:return True
+                if item.get('type')=='reasoning':
+                    value=item.get('summary') or item.get('summaries') or ''
+                    parts=[v if isinstance(v,str) else str(v.get('text') or '') for v in value] if isinstance(value,list) else [str(value)]
+                    if '\n\n'.join(parts).strip()==text:return True
+    return False
+def trim_voice(target=None):
+    now=int(time.time())
+    for key,path in db.execute('SELECT key,path FROM voice_cache WHERE expires_at<=?',(now,)).fetchall():
+        try:Path(path).unlink(missing_ok=True)
+        except OSError:continue
+        db.execute('DELETE FROM voice_cache WHERE key=?',(key,))
+    total=db.execute('SELECT COALESCE(SUM(size),0) FROM voice_cache').fetchone()[0]
+    if target is not None and total>target:
+        for key,size,path in db.execute('SELECT key,size,path FROM voice_cache ORDER BY last_used ASC').fetchall():
+            if total<=target:break
+            try:Path(path).unlink(missing_ok=True)
+            except OSError:continue
+            db.execute('DELETE FROM voice_cache WHERE key=?',(key,));total-=size
+    db.commit()
+    return total
+def voice_housekeeper():
+    # The server, not the intermittently powered PC, owns the 02:00 Beijing cleanup.
+    while True:
+        now=time.time(); local=time.gmtime(now+8*3600)
+        next_day=86400-(local.tm_hour*3600+local.tm_min*60+local.tm_sec)+2*3600
+        if local.tm_hour<2:next_day=2*3600-(local.tm_hour*3600+local.tm_min*60+local.tm_sec)
+        time.sleep(max(60,next_day))
+        with DB_LOCK:
+            with VOICE_LOCK:
+                total=trim_voice()
+                if total>VOICE_SCHEDULE_TRIGGER:trim_voice(VOICE_SCHEDULE_TARGET)
 ALLOWED_UPLOAD_EXT={'.jpg','.jpeg','.png','.webp','.gif','.bmp','.pdf','.doc','.docx','.xls','.xlsx','.csv','.ppt','.pptx','.txt','.md'}
 def valid_thread_id(value):
     try: uuid.UUID(str(value).removeprefix('urn:uuid:')); return True
@@ -135,6 +185,41 @@ class H(BaseHTTPRequestHandler):
             b=f.read_bytes(); self.send_response(200); self.send_header('Content-Type',row[1] or 'application/octet-stream'); self.send_header('Content-Length',str(len(b))); self.send_header('X-File-Name',quote(row[0])); self.end_headers(); self.wfile.write(b); return
         if p.path.startswith('/api/') and not self.authed():return self.json({'error':'feishu_login_required'},401)
         if p.path=='/api/models':return self.json(model_settings())
+        if p.path=='/api/preferences':
+            row=db.execute("SELECT value FROM meta WHERE key='web_preferences'").fetchone()
+            return self.json(json.loads(row[0]) if row else {'voiceEnabled':False,'turnCount':6,'updated':0})
+        if p.path=='/api/voice/config':
+            row=db.execute("SELECT value FROM meta WHERE key='voice_config'").fetchone()
+            config=json.loads(row[0]) if row else {}
+            return self.json({'voice':config.get('voice') or '','resource':config.get('resource') or '',
+                              'configured':bool(config.get('configured'))})
+        if p.path=='/api/voice/status':
+            keys=[key for key in (parse_qs(p.query).get('keys') or [''])[0].split(',') if voice_key(key)][:100]
+            return self.json({'cached':{key:voice_present(key) for key in keys}})
+        if p.path.startswith('/api/voice/audio/'):
+            key=unquote(p.path.removeprefix('/api/voice/audio/'))
+            with DB_LOCK:
+                with VOICE_LOCK:
+                    if not voice_present(key):return self.send_error(404)
+                    row=db.execute('SELECT path,size FROM voice_cache WHERE key=?',(key,)).fetchone()
+                    db.execute('UPDATE voice_cache SET last_used=? WHERE key=?',(int(time.time()),key));db.commit()
+                    file=Path(row[0])
+                    self.send_response(200);self.send_header('Content-Type','audio/mpeg')
+                    self.send_header('Content-Length',str(row[1]));self.send_header('Cache-Control','private, max-age=3600')
+                    self.end_headers()
+                    with file.open('rb') as stream:
+                        for chunk in iter(lambda:stream.read(256*1024),b''):self.wfile.write(chunk)
+            return
+        if p.path.startswith('/api/voice/task/'):
+            task_id=unquote(p.path.removeprefix('/api/voice/task/'))
+            row=db.execute("SELECT status,result,error FROM tasks WHERE id=? AND op='voice'",(task_id,)).fetchone()
+            if not row:return self.json({'error':'voice_task_not_found'},404)
+            return self.json({'status':row[0],'key':row[1],'error':row[2]})
+        if p.path.startswith('/api/reset-credit/task/'):
+            task_id=unquote(p.path.removeprefix('/api/reset-credit/task/'))
+            row=db.execute("SELECT status,result,error FROM tasks WHERE id=? AND op='reset_credit'",(task_id,)).fetchone()
+            if not row:return self.json({'error':'reset_task_not_found'},404)
+            return self.json({'status':row[0],'outcome':row[1],'error':row[2]})
         if p.path.startswith('/api/output-files/'):
             file_id=unquote(p.path.split('/api/output-files/',1)[1]);row=db.execute('SELECT name,mime,size,path,expires_at FROM output_files WHERE id=?',(file_id,)).fetchone()
             if not row or row[4]<int(time.time()) or not Path(row[3]).is_file():return self.send_error(404)
@@ -186,7 +271,21 @@ class H(BaseHTTPRequestHandler):
         if p.path=='/api/device/heartbeat':
             if not secrets.compare_digest(self.headers.get('Authorization') or '',f'Bearer {SYNC_TOKEN}'):return self.json({'error':'unauthorized'},401)
             data=json.loads(body or b'{}');now=int(time.time());active_ids=[str(x) for x in (data.get('activeThreadIds') or []) if valid_thread_id(x)][:20];runtime={'working':bool(data.get('working')),'activeThreadIds':active_ids,'historySyncAge':data.get('historySyncAge'),'historyError':str(data.get('historyError') or '')[:300],'updatedAt':now}
-            db.execute("INSERT INTO meta VALUES('heartbeat',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(str(now),));db.execute("INSERT INTO meta VALUES('runtime',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(json.dumps(runtime,ensure_ascii=False),));db.commit();settings=merge_model_settings(data.get('modelSettings') or {});return self.json({'ok':True,'modelChoices':settings['choices']})
+            db.execute("INSERT INTO meta VALUES('heartbeat',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(str(now),));db.execute("INSERT INTO meta VALUES('runtime',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(json.dumps(runtime,ensure_ascii=False),))
+            incoming=data.get('preferences') or {}; row=db.execute("SELECT value FROM meta WHERE key='web_preferences'").fetchone()
+            current=json.loads(row[0]) if row else {'voiceEnabled':False,'turnCount':6,'updated':0}
+            if isinstance(incoming,dict) and isinstance(incoming.get('updated'),(int,float)) and incoming['updated']>current.get('updated',0):
+                current={'voiceEnabled':bool(incoming.get('voiceEnabled')),
+                    'turnCount':incoming.get('turnCount') if incoming.get('turnCount') in (3,6,12) else 6,
+                    'updated':incoming['updated']}
+                db.execute("INSERT INTO meta VALUES('web_preferences',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(json.dumps(current),))
+            voice_config=data.get('voiceConfig') or {}
+            if isinstance(voice_config,dict):
+                safe={'voice':str(voice_config.get('voice') or '')[:100],
+                    'resource':str(voice_config.get('resource') or '')[:100],
+                    'configured':bool(voice_config.get('configured') and voice_config.get('voice') and voice_config.get('resource'))}
+                db.execute("INSERT INTO meta VALUES('voice_config',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(json.dumps(safe),))
+            db.commit();settings=merge_model_settings(data.get('modelSettings') or {});return self.json({'ok':True,'modelChoices':settings['choices'],'preferences':current})
         if p.path.startswith('/api/device/output-files/'):
             if not secrets.compare_digest(self.headers.get('Authorization') or '',f'Bearer {SYNC_TOKEN}'):return self.json({'error':'unauthorized'},401)
             file_id=unquote(p.path.split('/api/device/output-files/',1)[1]);name=unquote(self.headers.get('X-File-Name') or 'file');mime=self.headers.get('X-File-Mime') or 'application/octet-stream'
@@ -195,6 +294,71 @@ class H(BaseHTTPRequestHandler):
             usage=shutil.disk_usage(DB.parent);stored=db.execute('SELECT COALESCE(SUM(size),0) FROM output_files').fetchone()[0]
             if usage.free-len(body)<2*1024**3 or usage.free/usage.total<.10 or stored+len(body)>5*1024**3:return self.json({'error':'storage_low','message':'云端可用存储不足'},507)
             path=UPLOADS/f'output-{file_id}{Path(name).suffix.lower()}';path.write_bytes(body);now=int(time.time());db.execute('INSERT OR REPLACE INTO output_files VALUES(?,?,?,?,?,?,?)',(file_id,Path(name).name,mime,len(body),str(path),now,now+7*86400));db.commit();return self.json({'ok':True,'fileId':file_id,'expiresAt':now+7*86400})
+        if p.path.startswith('/api/device/voice/'):
+            if not secrets.compare_digest(self.headers.get('Authorization') or '',f'Bearer {SYNC_TOKEN}'):return self.json({'error':'unauthorized'},401)
+            key=unquote(p.path.removeprefix('/api/device/voice/'))
+            if not voice_key(key) or not 0<len(body)<=20*1024**2:return self.json({'error':'invalid_voice_audio'},400)
+            with VOICE_LOCK:
+                stored=trim_voice()
+                free=shutil.disk_usage(DB.parent).free
+                previous=db.execute('SELECT size FROM voice_cache WHERE key=?',(key,)).fetchone()
+                projected=stored+len(body)-(previous[0] if previous else 0)
+                if projected>=VOICE_TRIGGER or free-len(body)<10*1024**3:
+                    stored=trim_voice(VOICE_TARGET)
+                    free=shutil.disk_usage(DB.parent).free
+                if stored+len(body)>VOICE_LIMIT or free-len(body)<10*1024**3:return self.json({'error':'voice_storage_low'},507)
+                path=VOICE_DIR/(key+'.mp3'); temp=VOICE_DIR/(key+'.'+uuid.uuid4().hex+'.tmp')
+                try:temp.write_bytes(body);os.replace(temp,path)
+                finally:temp.unlink(missing_ok=True)
+                now=int(time.time())
+                db.execute('INSERT OR REPLACE INTO voice_cache VALUES(?,?,?,?,?,?)',(key,len(body),str(path),now,now+72*3600,now))
+                db.commit()
+            return self.json({'ok':True,'key':key,'expiresAt':now+72*3600})
+        if p.path=='/api/preferences':
+            if not self.authed():return self.json({'error':'feishu_login_required'},401)
+            payload=json.loads(body or b'{}')
+            old=db.execute("SELECT value FROM meta WHERE key='web_preferences'").fetchone()
+            current=json.loads(old[0]) if old else {'voiceEnabled':False,'turnCount':6,'updated':0}
+            if 'voiceEnabled' in payload:current['voiceEnabled']=bool(payload['voiceEnabled'])
+            if 'turnCount' in payload and payload['turnCount'] in (3,6,12):current['turnCount']=payload['turnCount']
+            current['updated']=time.time()
+            db.execute("INSERT INTO meta VALUES('web_preferences',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(json.dumps(current),))
+            db.commit();return self.json(current)
+        if p.path=='/api/voice/request':
+            if not self.authed():return self.json({'error':'feishu_login_required'},401)
+            payload=json.loads(body or b'{}');text=str(payload.get('text') or '').strip();key=str(payload.get('key') or '')
+            thread_id=str(payload.get('threadId') or '')
+            if not voice_key(key) or not valid_thread_id(thread_id) or not 0<len(text)<=12000:
+                return self.json({'error':'invalid_voice_request'},400)
+            pref=db.execute("SELECT value FROM meta WHERE key='web_preferences'").fetchone()
+            if not pref or not json.loads(pref[0]).get('voiceEnabled'):
+                return self.json({'error':'voice_disabled'},403)
+            cfg=db.execute("SELECT value FROM meta WHERE key='voice_config'").fetchone()
+            cfg=json.loads(cfg[0]) if cfg else {}
+            expected=hashlib.sha256(json.dumps([text,cfg.get('voice') or '',cfg.get('resource') or '','v3-sse-mp3'],ensure_ascii=False,separators=(',',':')).encode()).hexdigest()
+            if not cfg.get('configured') or expected!=key or not voice_authorized(thread_id,text):
+                return self.json({'error':'voice_reply_not_finalized_or_config_changed'},400)
+            if voice_present(key):return self.json({'cached':True,'key':key})
+            heartbeat=db.execute("SELECT value FROM meta WHERE key='heartbeat'").fetchone()
+            if not heartbeat or time.time()-int(heartbeat[0])>75:
+                return self.json({'error':'本机离线，暂不能朗读'},503)
+            existing=db.execute("SELECT id FROM tasks WHERE op='voice' AND result=? AND status IN ('queued','claimed','running') ORDER BY created_at DESC LIMIT 1",(key,)).fetchone()
+            if existing:return self.json({'taskId':existing[0],'cached':False})
+            task_id=uuid.uuid4().hex;now=int(time.time())
+            db.execute("INSERT INTO tasks(id,op,thread_id,text,source,status,created_at,updated_at,result) VALUES(?,?,?,?,?,?,?,?,?)",(task_id,'voice',thread_id,text,'web','queued',now,now,key))
+            db.commit();return self.json({'taskId':task_id,'cached':False},202)
+        if p.path=='/api/reset-credit':
+            if not self.authed():return self.json({'error':'feishu_login_required'},401)
+            payload=json.loads(body or b'{}')
+            if payload.get('confirmed') is not True:return self.json({'error':'explicit_confirmation_required'},400)
+            key=str(payload.get('idempotencyKey') or '')
+            if not valid_thread_id(key):return self.json({'error':'invalid_idempotency_key'},400)
+            existing=db.execute("SELECT id FROM tasks WHERE id=? AND op='reset_credit'",(key,)).fetchone()
+            if existing:return self.json({'taskId':key},202)
+            task_id=key;now=int(time.time())
+            db.execute("INSERT INTO tasks(id,op,source,status,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+                (task_id,'reset_credit','web','queued',now,now));db.commit()
+            return self.json({'taskId':task_id},202)
         if p.path=='/api/sync':
             if not secrets.compare_digest(self.headers.get('Authorization') or '',f'Bearer {SYNC_TOKEN}'):return self.json({'error':'unauthorized'},401)
             with HISTORY_LOCK:
@@ -272,4 +436,6 @@ import history_store
 DB_LOCK=__import__('threading').RLock()
 HISTORY_LOCK=DB_LOCK
 history_store.initialize(db)
+with DB_LOCK:trim_voice()
+__import__('threading').Thread(target=voice_housekeeper,daemon=True).start()
 ThreadingHTTPServer(('127.0.0.1',8780),H).serve_forever()

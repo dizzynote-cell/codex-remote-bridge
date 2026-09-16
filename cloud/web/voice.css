@@ -1,0 +1,12 @@
+.voice-actions{display:flex;justify-content:flex-end;margin-top:6px}
+.voice-button{width:29px;height:29px;border:1px solid #566477;border-radius:6px;background:#1c232d;color:#e4edf7;display:inline-grid;place-items:center;cursor:pointer;font-size:15px;line-height:1}
+.voice-button.cached{background:#245365;border-color:#71c9df;color:#fff}
+.voice-button.busy{opacity:.65;cursor:wait}
+.voice-button:focus-visible{outline:2px solid #8bd8ff;outline-offset:2px}
+.voice-player{width:min(260px,100%);height:34px;margin-left:8px;vertical-align:middle}
+#voice-settings{display:flex;flex-direction:column;gap:7px;min-width:225px;padding-top:8px}
+#voice-settings hr{width:100%;border:0;border-top:1px solid #506070;margin:5px 0}
+#voice-settings .voice-setting{display:flex;align-items:center;gap:7px}
+#voice-settings small{opacity:.7;line-height:1.3}
+#voice-settings button{align-self:flex-start;border:1px solid #68829b;border-radius:5px;background:#293b4e;color:#fff;padding:5px 9px}
+#voice-settings button:disabled{opacity:.45}

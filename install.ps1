@@ -12,7 +12,7 @@ Write-Host 'About 10-20 minutes, 6 steps:'
 Write-Host '  1. Check Windows, Python and Codex'
 Write-Host '  2. Choose Feishu-only or Feishu + Web'
 Write-Host '  3. Configure the Feishu app'
-Write-Host '  4. Configure project and large-file folders'
+Write-Host '  4. Configure folders and optional voice reading'
 Write-Host '  5. Configure domain/server (Web mode only)'
 Write-Host '  6. Install dependencies and auto-start'
 Read-Host 'Press Enter to begin'
@@ -34,6 +34,13 @@ if($mode -eq '2'){
 }else{Write-Host '[5/6] Server configuration skipped.' -ForegroundColor DarkGray}
 New-Item -ItemType Directory -Force -Path (Join-Path $root 'config') | Out-Null
 @("FEISHU_APP_ID=$appId","FEISHU_APP_SECRET=$appSecret","CODEX_HISTORY_URL=$historyUrl","CODEX_HISTORY_SYNC_TOKEN=$syncToken","CODEX_HISTORY_SSH_HOST=$sshHost","CODEX_HISTORY_SSH_KEY=$sshKey","CODEX_LARGE_FILE_DIR=$largeFileDir","CODEX_PROJECTS_ROOT=$projectsRoot","CODEX_STANDALONE_DIR=$standaloneDir") | Set-Content -LiteralPath (Join-Path $root 'config\.env') -Encoding utf8
+$enableVoice=Ask 'Configure optional voice reading (Volcengine TTS)? (Y/N)' 'N'
+if($enableVoice -match '^[Yy]'){
+ $voiceKey=Clean (Ask 'VOLC_API_KEY'); $voiceId=Clean (Ask 'VOLC_VOICE_ID'); $resourceId=Clean (Ask 'X-Api-Resource-Id')
+ if(-not $voiceKey -or -not $voiceId -or -not $resourceId){throw 'Voice API key, voice ID and resource ID are required.'}
+ @("VOLC_API_KEY=$voiceKey","VOLC_VOICE_ID=$voiceId","X-Api-Resource-Id=$resourceId") | Set-Content -LiteralPath (Join-Path $root 'config\voiceapi.env') -Encoding utf8
+ Write-Host 'Saved the optional voice configuration locally; the API key is never sent to the Web server.' -ForegroundColor Green
+}
 if($mode -eq '2'){
  @("FEISHU_APP_ID=$appId","FEISHU_APP_SECRET=$appSecret","FEISHU_OWNER_OPEN_ID=replace_after_first_owner_binding","SYNC_TOKEN=$syncToken","PUBLIC_BASE_URL=$domain","CLIENT_PROJECTS_ROOT=$projectsRoot","CLIENT_STANDALONE_DIR=$standaloneDir","CODEX_HISTORY_DB=/opt/codex-history/data/history.db") | Set-Content -LiteralPath (Join-Path $root 'cloud\.env.generated') -Encoding utf8
  Write-Host 'Generated cloud/.env.generated. Upload securely; never commit it.' -ForegroundColor Yellow

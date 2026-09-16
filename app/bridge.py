@@ -31,6 +31,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from lark_oapi.api.im.v1 import *
 from codex_rpc import CodexRpc
+import voice_tts
 
 ENV_FILE = ROOT / "config" / ".env"
 DATA_DIR = ROOT / "data"
@@ -39,6 +40,8 @@ WEB_DIR = ROOT / "web"
 INBOX_DIR = DATA_DIR / "feishu-inbox"
 WEB_INBOX_DIR = DATA_DIR / "web-inbox"
 STATE_FILE = DATA_DIR / "state.json"
+VOICE_DIR = DATA_DIR / "voice-cache"
+PREFERENCES_FILE = DATA_DIR / "web-preferences.json"
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -140,7 +143,51 @@ def account_quota() -> dict:
     primary = snapshot.get("primary") or {}
     used = max(0, min(100, int(primary.get("usedPercent") or 0)))
     return {"available": bool(primary), "usedPercent": used, "remainingPercent": 100 - used,
-            "resetsAt": primary.get("resetsAt"), "planType": snapshot.get("planType")}
+            "resetsAt": primary.get("resetsAt"), "planType": snapshot.get("planType"),
+            "resetCredits": (result.get("rateLimitResetCredits") or {}).get("availableCount")
+            if result.get("rateLimitResetCredits") is not None else None}
+
+def web_preferences() -> dict:
+    try: saved=json.loads(PREFERENCES_FILE.read_text(encoding="utf-8"))
+    except (FileNotFoundError,ValueError):saved={}
+    return {"voiceEnabled":bool(saved.get("voiceEnabled",False)),
+            "turnCount":saved.get("turnCount") if saved.get("turnCount") in (3,6,12) else 6,
+            "updated":float(saved.get("updated") or 0)}
+
+def save_web_preferences(payload: dict) -> dict:
+    current=web_preferences()
+    if "voiceEnabled" in payload:current["voiceEnabled"]=bool(payload["voiceEnabled"])
+    if payload.get("turnCount") in (3,6,12):current["turnCount"]=payload["turnCount"]
+    current["updated"]=time.time()
+    temporary=PREFERENCES_FILE.with_suffix(".tmp")
+    temporary.write_text(json.dumps(current,ensure_ascii=False),encoding="utf-8")
+    os.replace(temporary,PREFERENCES_FILE)
+    return current
+
+def merge_web_preferences(remote: dict) -> None:
+    if not isinstance(remote,dict) or float(remote.get("updated") or 0)<=web_preferences()["updated"]:
+        return
+    values={"voiceEnabled":bool(remote.get("voiceEnabled")),
+            "turnCount":remote.get("turnCount") if remote.get("turnCount") in (3,6,12) else 6,
+            "updated":float(remote["updated"])}
+    temporary=PREFERENCES_FILE.with_suffix(".tmp")
+    temporary.write_text(json.dumps(values),encoding="utf-8")
+    os.replace(temporary,PREFERENCES_FILE)
+
+def voice_text_in_completed_turn(thread_id: str, text: str) -> bool:
+    if not is_valid_thread_id(thread_id):
+        return False
+    thread=read_thread(thread_id)
+    for turn in thread.get("turns") or []:
+        if turn.get("status")!="completed":continue
+        for item in turn.get("items") or []:
+            if item.get("type")=="agentMessage" and item.get("phase")!="commentary" and (item.get("text") or "").strip()==text:
+                return True
+            if item.get("type")=="reasoning":
+                summary=item.get("summary") or item.get("summaries") or ""
+                parts=[part if isinstance(part,str) else str(part.get("text") or "") for part in summary] if isinstance(summary,list) else [str(summary)]
+                if "\n\n".join(parts).strip()==text:return True
+    return False
 
 
 def reset_codex_rpc(reason: str) -> None:
@@ -539,6 +586,36 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/quota":
                 self.send_json(account_quota())
                 return
+            if parsed.path == "/api/preferences":
+                self.send_json(web_preferences())
+                return
+            if parsed.path == "/api/voice/config":
+                config=voice_tts.settings(ROOT)
+                self.send_json({"voice":config["voice"],"resource":config["resource"],
+                                "configured":bool(all(config.values()))})
+                return
+            if parsed.path == "/api/voice/status":
+                config=voice_tts.settings(ROOT)
+                keys=[value for value in parse_qs(parsed.query).get("keys",[""])[0].split(",") if len(value)==64][:100]
+                self.send_json({"enabled":web_preferences()["voiceEnabled"],
+                    "configured":bool(all(config.values())),
+                    "cached":{key:voice_tts.cached(VOICE_DIR,key) for key in keys}})
+                return
+            if parsed.path.startswith("/api/voice/audio/"):
+                digest=parsed.path.removeprefix("/api/voice/audio/")
+                try:file=voice_tts.cache_file(VOICE_DIR,digest)
+                except ValueError:self.send_error(404);return
+                if not file.is_file():self.send_error(404);return
+                self.send_response(200)
+                self.send_header("Content-Type","audio/mpeg")
+                self.send_header("Content-Length",str(file.stat().st_size))
+                self.send_header("Cache-Control","private, max-age=3600")
+                self.end_headers()
+                with file.open("rb") as audio:
+                    for chunk in iter(lambda:audio.read(256*1024),b""):
+                        self.wfile.write(chunk)
+                os.utime(file,None)
+                return
             if parsed.path.startswith("/api/local-task/"):
                 task_id = parsed.path.removeprefix("/api/local-task/")
                 with local_web_tasks_lock:
@@ -670,6 +747,44 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     return
                 model_choices.choose(thread_id, payload.get("model"), effort=payload.get("effort"))
                 self.send_json(model_choices.snapshot(False))
+                return
+            if parsed.path == "/api/preferences":
+                if not self.is_local_request():
+                    self.send_json({"error":"local_only"},403);return
+                size=min(int(self.headers.get("Content-Length") or 0),8192)
+                self.send_json(save_web_preferences(json.loads(self.rfile.read(size) or b"{}")))
+                return
+            if parsed.path == "/api/reset-credit":
+                if not self.is_local_request():
+                    self.send_json({"error":"local_only"},403);return
+                size=min(int(self.headers.get("Content-Length") or 0),1024)
+                payload=json.loads(self.rfile.read(size) or b"{}")
+                if payload.get("confirmed") is not True or not is_valid_thread_id(payload.get("idempotencyKey")):
+                    self.send_json({"error":"explicit_confirmation_required"},400);return
+                with codex_lock:
+                    result=codex_rpc.call("account/rateLimitResetCredit/consume",
+                        {"idempotencyKey":payload["idempotencyKey"]},timeout=20)
+                self.send_json({"outcome":result.get("outcome"),"quota":account_quota()})
+                return
+            if parsed.path == "/api/voice/request":
+                if not self.is_local_request():
+                    self.send_json({"error":"local_only"},403);return
+                size=min(int(self.headers.get("Content-Length") or 0),65536)
+                payload=json.loads(self.rfile.read(size) or b"{}")
+                text=str(payload.get("text") or "").strip()
+                thread_id=str(payload.get("threadId") or "")
+                config=voice_tts.settings(ROOT)
+                if not web_preferences()["voiceEnabled"]:
+                    self.send_json({"error":"voice_disabled"},403);return
+                if not voice_text_in_completed_turn(thread_id,text):
+                    self.send_json({"error":"voice_reply_not_finalized"},400);return
+                if str(payload.get("key") or "")!=voice_tts.key(text,config):
+                    self.send_json({"error":"voice_key_mismatch"},400);return
+                try:digest,_=voice_tts.synthesize(text,VOICE_DIR,config)
+                except Exception as error:
+                    log(f"TTS 合成失败：{type(error).__name__}")
+                    self.send_json({"error":str(error) if isinstance(error,ValueError) else "voice_provider_unavailable"},502);return
+                self.send_json({"key":digest,"cached":True})
                 return
             if parsed.path == "/api/local-tasks":
                 if not self.is_local_request():
@@ -868,12 +983,16 @@ def cloud_heartbeat_worker() -> None:
                 (list(cloud_runtime_state.get("detected_thread_ids") or []) if detected_recently else [])))
             response = requests.post(f"{base}/api/device/heartbeat",
                 headers={"Authorization": f"Bearer {token}"},
-                json={"modelSettings": model_choices.snapshot(False), "working": bool(active_thread_ids) or bool(active_turns) or detected_recently,
+                json={"modelSettings": model_choices.snapshot(False), "preferences":web_preferences(),
+                      "voiceConfig":{**{key:voice_tts.settings(ROOT)[key] for key in ("voice","resource")},
+                                     "configured":bool(all(voice_tts.settings(ROOT).values()))},
+                      "working": bool(active_thread_ids) or bool(active_turns) or detected_recently,
                       "activeThreadIds": active_thread_ids,
                       "historySyncAge": max(0, int(time.time() - last_sync)) if last_sync else None,
                       "historyError": cloud_runtime_state.get("last_error") or ""}, timeout=(8, 15))
             response.raise_for_status()
             model_choices.merge(response.json().get("modelChoices") or {})
+            merge_web_preferences(response.json().get("preferences") or {})
         except Exception as error:
             log(f"云端心跳暂时失败：{error}")
         time.sleep(10)
@@ -929,6 +1048,33 @@ def execute_cloud_task(task: dict) -> None:
     task_id = task["id"]
     try:
         operation = task.get("op") or "message"
+        if operation == "voice":
+            thread_id=str(task.get("threadId") or "")
+            text=str(task.get("text") or "").strip()
+            config=voice_tts.settings(ROOT)
+            digest=voice_tts.key(text,config)
+            if not web_preferences()["voiceEnabled"] or not voice_text_in_completed_turn(thread_id,text):
+                raise RuntimeError("voice_reply_not_finalized_or_disabled")
+            cloud_task_report(task_id,"status",{"message":"正在合成语音"},"running")
+            digest,file=voice_tts.synthesize(text,VOICE_DIR,config)
+            base=cloud_base_url();token=(os.getenv("CODEX_HISTORY_SYNC_TOKEN") or "").strip()
+            if not base or not token:raise RuntimeError("voice_cloud_sync_not_configured")
+            with file.open("rb") as stream:
+                response=http.post(f"{base}/api/device/voice/{digest}",
+                    headers={"Authorization":f"Bearer {token}","Content-Type":"audio/mpeg"},
+                    data=stream,timeout=(10,90))
+            response.raise_for_status()
+            cloud_task_report(task_id,"completed",{"message":"语音已就绪","key":digest},
+                "completed",result=digest)
+            return
+        if operation == "reset_credit":
+            cloud_task_report(task_id,"status",{"message":"正在使用重置卡"},"running")
+            with codex_lock:
+                result=codex_rpc.call("account/rateLimitResetCredit/consume",
+                    {"idempotencyKey":task_id},timeout=20)
+            outcome=result.get("outcome") or "unknown"
+            cloud_task_report(task_id,"completed",{"message":outcome},"completed",result=outcome)
+            return
         if operation == "new_thread":
             cloud_task_report(task_id, "status", {"message": "正在创建新对话"}, "running")
             cwd = Path(str(task.get("cwd") or "").strip())
