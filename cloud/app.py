@@ -196,6 +196,13 @@ class H(BaseHTTPRequestHandler):
         if p.path=='/api/voice/status':
             keys=[key for key in (parse_qs(p.query).get('keys') or [''])[0].split(',') if voice_key(key)][:100]
             return self.json({'cached':{key:voice_present(key) for key in keys}})
+        if p.path.startswith('/api/voice/lookup/'):
+            key=unquote(p.path.removeprefix('/api/voice/lookup/'))
+            if not voice_key(key):return self.json({'error':'invalid_voice_key'},400)
+            if voice_present(key):return self.json({'status':'completed','key':key,'cached':True})
+            row=db.execute("SELECT id,status,error FROM tasks WHERE op='voice' AND result=? ORDER BY created_at DESC,updated_at DESC LIMIT 1",(key,)).fetchone()
+            return self.json({'status':row[1] if row else 'missing','taskId':row[0] if row else None,
+                              'error':row[2] if row else None,'cached':False})
         if p.path.startswith('/api/voice/audio/'):
             key=unquote(p.path.removeprefix('/api/voice/audio/'))
             with DB_LOCK:
@@ -336,8 +343,9 @@ class H(BaseHTTPRequestHandler):
             cfg=db.execute("SELECT value FROM meta WHERE key='voice_config'").fetchone()
             cfg=json.loads(cfg[0]) if cfg else {}
             expected=hashlib.sha256(json.dumps([text,cfg.get('voice') or '',cfg.get('resource') or '','v3-sse-mp3-rate25'],ensure_ascii=False,separators=(',',':')).encode()).hexdigest()
-            if not cfg.get('configured') or expected!=key or not voice_authorized(thread_id,text):
-                return self.json({'error':'voice_reply_not_finalized_or_config_changed'},400)
+            if not cfg.get('configured'):return self.json({'error':'voice_not_configured'},400)
+            if expected!=key:return self.json({'error':'voice_key_mismatch_refresh_page'},400)
+            if not voice_authorized(thread_id,text):return self.json({'error':'voice_reply_not_finalized_or_history_stale'},400)
             if voice_present(key):return self.json({'cached':True,'key':key})
             heartbeat=db.execute("SELECT value FROM meta WHERE key='heartbeat'").fetchone()
             if not heartbeat or time.time()-int(heartbeat[0])>75:

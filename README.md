@@ -2,7 +2,7 @@
 
 网页端可选语音朗读：已完成的推理摘要和最终回复可按需调用火山 TTS。语音默认关闭；安装时可选填 API Key、音色 ID 和资源 ID，密钥只保存在主力电脑。已合成的语音点击即可播放，未合成的语音点击后生成。本机语音只按容量清理；公网临时缓存保留最多 72 小时，并设 5 GB 上限。
 
-**v0.2.9-beta 测试版 · 作者：[xiyannan](https://github.com/dizzynote-cell/codex-remote-bridge)**
+**v0.2.10-beta 测试版 · 作者：[xiyannan](https://github.com/dizzynote-cell/codex-remote-bridge)**
 
 [查看版本更新日志](CHANGELOG.md)
 
