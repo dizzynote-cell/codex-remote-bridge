@@ -6,7 +6,7 @@ const {webcrypto}=require('node:crypto');
 async function check(file){
   let posts=0, release;
   const stored=new Map();
-  let button;
+  let button,player;
   const ref='turn-1:answer-1';
   const buttonFactory=()=>({dataset:{voiceRef:ref},classList:{toggle(){}},closest:()=>null,
     disabled:false,title:'',textContent:'',onclick:null,after(){}});
@@ -28,7 +28,9 @@ async function check(file){
   const context={window:{},location:{hostname:'example.com'},fetch,crypto:webcrypto,TextEncoder,
     sessionStorage:{getItem:key=>stored.get(key)||null,setItem:(key,value)=>stored.set(key,value)},
     document:{querySelectorAll:selector=>selector==='.voice-button'?[button]:[],
-      querySelector:()=>null,createElement:()=>({play:async()=>{},remove(){},set src(v){this.url=v}})},
+      querySelector:selector=>selector==='#messages'?{after:element=>stored.set('dock',element)}:null,
+      createElement:()=>({hidden:false,setAttribute(){},append(){},insertBefore(element){player=element},
+        play:async()=>{},pause(){},remove(){},set src(v){this.url=v}}),body:{append:element=>stored.set('dock',element)}},
     MutationObserver:class{},setTimeout,console,confirm:()=>true,alert:()=>{}};
   vm.runInNewContext(fs.readFileSync(file,'utf8'),context,{filename:file});
   await context.window.voiceUI.settings();
@@ -53,7 +55,16 @@ async function check(file){
   release();
   await new Promise(resolve=>setTimeout(resolve,20));
   assert.equal(button.textContent,'🔊',`${file}: completed request must restore cached state`);
+  const dock=stored.get('dock');
+  assert.ok(dock&&!dock.hidden,`${file}: audio dock must sit outside the message list`);
+  // New message content replaces the old response DOM, not the audio dock.
+  button=buttonFactory();
+  assert.ok(player&&dock.hidden===false,`${file}: fresh replies must not interrupt audio`);
+  player.pause();
+  assert.equal(dock.hidden,false,`${file}: pause must keep the player available`);
+  player.onended();
+  assert.equal(dock.hidden,true,`${file}: natural completion must close the player`);
 }
 
 (async()=>{for(const file of ['web/voice-ui.js','cloud/web/voice-ui.js'])await check(file);
-  console.log('PASS voice task survives refresh without duplicate POST');})().catch(error=>{console.error(error);process.exitCode=1;});
+  console.log('PASS voice task dedupe and uninterrupted player lifecycle');})().catch(error=>{console.error(error);process.exitCode=1;});

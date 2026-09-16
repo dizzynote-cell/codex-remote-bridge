@@ -1,7 +1,7 @@
 // Shared by loopback and hosted UIs. Never sends an API secret to the browser.
 (()=>{
   const records=new Map(), snapshots=new Map(), jobs=new Map(), polling=new Set(), reconciling=new Set(), requests=new Set();
-  let prefs={voiceEnabled:false}, config={voice:'',resource:'',configured:false}, thread='', audio=null,settingsRefreshing=false;
+  let prefs={voiceEnabled:false}, config={voice:'',resource:'',configured:false}, thread='', audio=null,dock=null,dockLabel=null,dockMessage=null,settingsRefreshing=false;
   const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const hosted=location.hostname!=='127.0.0.1'&&location.hostname!=='localhost';
   const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
@@ -165,21 +165,43 @@
     }
     throw new Error('等待重置卡结果超时');
   }
+  function ensureDock(){
+    if(dock)return dock;
+    dock=document.createElement('section');dock.id='voice-dock';dock.className='voice-dock';dock.hidden=true;
+    dock.setAttribute('aria-label','语音播放器');
+    dockLabel=document.createElement('strong');dockLabel.className='voice-dock-label';
+    dockMessage=document.createElement('span');dockMessage.className='voice-dock-message';
+    const close=document.createElement('button');close.type='button';close.className='voice-dock-close';
+    close.textContent='关闭';close.setAttribute('aria-label','关闭语音播放器');close.onclick=closePlayer;
+    dock.append(dockLabel,dockMessage,close);
+    const messages=document.querySelector('#messages');
+    if(messages)messages.after(dock);else document.body.append(dock);
+    return dock;
+  }
+  function closePlayer(){
+    if(audio){audio.onended=null;audio.onerror=null;audio.pause();audio.remove();audio=null;}
+    if(dock){dockMessage.textContent='';dock.hidden=true;}
+  }
   function play(ref,key){
-    if(audio){audio.pause();audio=null;}
+    closePlayer();
     const item=records.get(ref);
     const button=[...document.querySelectorAll('.voice-button')].find(b=>b.dataset.voiceRef===ref);
     if(!button||!item)return;
+    ensureDock();
+    dockLabel.textContent=item.kind==='final'?'最终回复语音':'推理摘要语音';
+    dockMessage.textContent='';dock.hidden=false;
     const player=document.createElement('audio');
     player.src='/api/voice/audio/'+encodeURIComponent(key);
     player.preload='auto';player.controls=true;player.className='voice-player';
-    button.after(player);audio=player;
+    dock.insertBefore(player,dockMessage);audio=player;
     player.onerror=()=>{
       const state=snapshot(item.threadId);state.cached[key]=false;save(item.threadId);
-      update(item,'failed','语音文件无法播放或缓存已过期；请检查登录，再点击重试');player.remove();audio=null;
+      update(item,'failed','语音文件无法播放或缓存已过期；请检查登录，再点击重试');
+      dockMessage.textContent='播放失败：请检查网络或登录状态。';player.remove();audio=null;
     };
-    player.onended=()=>{player.remove();audio=null;};
-    player.play().catch(()=>{paint(ref,'cached','浏览器阻止自动播放，请点旁边的播放器播放键');});
+    player.onended=closePlayer;
+    player.onplaying=()=>{dockMessage.textContent='';};
+    player.play().catch(()=>{dockMessage.textContent='浏览器阻止自动播放，请点播放器的播放键。';});
   }
   async function click(ref){
     const item=records.get(ref);
