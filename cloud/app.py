@@ -6,6 +6,7 @@
 import base64, binascii, hashlib, json, os, re, secrets, shutil, sqlite3, time, uuid
 import interactions
 import thread_organizer
+from thread_visibility import Visibility
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -317,12 +318,13 @@ class H(BaseHTTPRequestHandler):
                     'resource':str(voice_config.get('resource') or '')[:100],
                     'configured':bool(voice_config.get('configured') and voice_config.get('voice') and voice_config.get('resource'))}
                 db.execute("INSERT INTO meta VALUES('voice_config',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(json.dumps(safe),))
+            visibility=sync_visibility(data.get('threadVisibility') or {})
             organizer=thread_organizer.merge(db,data.get('threadOrganizer') or {})
             projects=data.get('projects') or []
             if isinstance(projects,list):
                 projects=[{'id':str(item.get('id') or '')[:100],'name':str(item.get('name') or '')[:100],'cwd':str(item.get('cwd') or '')[:500]} for item in projects if isinstance(item,dict) and item.get('cwd')][:100]
                 db.execute("INSERT INTO meta VALUES('codex_projects',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(json.dumps(projects,ensure_ascii=False),))
-            db.commit();settings=merge_model_settings(data.get('modelSettings') or {});return self.json({'ok':True,'modelChoices':settings['choices'],'preferences':current,'threadOrganizer':organizer})
+            db.commit();settings=merge_model_settings(data.get('modelSettings') or {});return self.json({'ok':True,'modelChoices':settings['choices'],'preferences':current,'threadOrganizer':organizer,'threadVisibility':visibility})
         if p.path.startswith('/api/device/output-files/'):
             if not secrets.compare_digest(self.headers.get('Authorization') or '',f'Bearer {SYNC_TOKEN}'):return self.json({'error':'unauthorized'},401)
             file_id=unquote(p.path.split('/api/device/output-files/',1)[1]);name=unquote(self.headers.get('X-File-Name') or 'file');mime=self.headers.get('X-File-Mime') or 'application/octet-stream'
@@ -459,11 +461,16 @@ class H(BaseHTTPRequestHandler):
             db.execute('INSERT INTO task_events(task_id,kind,payload,created_at) VALUES(?,?,?,?)',(task_id,'queued',json.dumps({'message':'已提交，等待本机桥接收','files':[x[0] for x in decoded]},ensure_ascii=False),now)); db.commit(); return self.json({'ok':True,'taskId':task_id,'status':'queued'},202)
         if p.path in {'/api/threads/hide','/api/threads/unhide'}:
             if not self.authed():return self.json({'error':'feishu_login_required'},401)
-            data=json.loads(body or b'{}'); thread_id=str(data.get('threadId') or '').strip()
-            if not thread_id:return self.json({'error':'missing_thread_id'},400)
-            if p.path.endswith('/hide'):db.execute('INSERT OR REPLACE INTO hidden_threads(thread_id,hidden_at) VALUES(?,?)',(thread_id,int(time.time())))
-            else:db.execute('DELETE FROM hidden_threads WHERE thread_id=?',(thread_id,))
-            db.commit(); return self.json({'ok':True,'hidden':p.path.endswith('/hide')})
+            origin=self.headers.get('Origin')
+            if origin and urlparse(origin).netloc!=self.headers.get('Host'):return self.json({'error':'origin_mismatch'},403)
+            if not self.headers.get('Content-Type','').startswith('application/json'):return self.json({'error':'json_required'},415)
+            try:
+                data=json.loads(body or b'{}')
+                if not isinstance(data,dict) or not valid_thread_id(data.get('threadId')):raise ValueError('invalid_thread_id')
+                thread_visibility.set(data['threadId'],p.path.endswith('/hide'),data.get('name',''))
+                sync_visibility({})
+                return self.json({'ok':True})
+            except (ValueError,TypeError):return self.json({'error':'invalid_payload'},400)
         if p.path=='/api/auth/feishu':
             code=json.loads(body).get('code',''); identity=self.exchange_feishu_code(code)
             if identity.get('open_id')!=OWNER:return self.json({'error':'owner_mismatch'},403)
@@ -476,6 +483,18 @@ HISTORY_LOCK=DB_LOCK
 history_store.initialize(db)
 interactions.initialize(db)
 thread_organizer.initialize(db)
+thread_visibility=Visibility(DB.parent/'thread-visibility.json')
+if not thread_visibility.path.exists():
+    legacy=db.execute('SELECT h.thread_id,h.hidden_at,t.name FROM hidden_threads h LEFT JOIN threads t ON t.id=h.thread_id').fetchall()
+    thread_visibility.merge({r[0]:{'hidden':True,'updated':r[1],'name':r[2] or ''} for r in legacy if valid_thread_id(r[0])})
+def sync_visibility(incoming):
+    state=thread_visibility.merge(incoming)
+    for key,item in state.items():
+        if item['hidden']:db.execute('INSERT OR REPLACE INTO hidden_threads VALUES(?,?)',(key,int(item['updated'])))
+        else:db.execute('DELETE FROM hidden_threads WHERE thread_id=?',(key,))
+    db.commit()
+    return state
+sync_visibility({})
 with DB_LOCK:trim_voice()
 __import__('threading').Thread(target=voice_housekeeper,daemon=True).start()
 ThreadingHTTPServer(('127.0.0.1',8780),H).serve_forever()

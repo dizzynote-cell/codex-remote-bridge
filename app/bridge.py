@@ -33,6 +33,7 @@ from lark_oapi.api.im.v1 import *
 from codex_rpc import CodexRpc
 import voice_tts
 from thread_organizer import Organizer
+from thread_visibility import Visibility
 
 ENV_FILE = ROOT / "config" / ".env"
 DATA_DIR = ROOT / "data"
@@ -103,6 +104,7 @@ codex_rpc = CodexRpc()
 from model_choices import ModelChoices
 model_choices = ModelChoices(DATA_DIR, lambda: codex_rpc, codex_lock)
 thread_organizer = Organizer(ORGANIZER_FILE)
+thread_visibility = Visibility(DATA_DIR / "thread-visibility.json")
 active_turns: dict[str, str] = {}
 thread_message_locks: dict[str, threading.Lock] = {}
 thread_message_locks_guard = threading.Lock()
@@ -589,7 +591,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 limit = min(max(int(query.get("limit", [50])[0]), 1), 100)
                 cursor = query.get("cursor", [None])[0]
                 result = list_threads_page(limit, cursor)
-                threads = result.get("data", [])
+                hidden = thread_visibility.snapshot()
+                threads = [item for item in result.get("data", []) if not hidden.get(item.get("id"), {}).get("hidden")]
                 self.send_json({"threads": [{
                     "id": item.get("id"),
                     "name": thread_organizer.get(item.get("id")).get("name") or item.get("name") or "未命名对话",
@@ -600,6 +603,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     "preview": item.get("preview"),
                     "updatedAt": item.get("updatedAt"),
                 } for item in threads], "projects": codex_sidebar_projects(), "nextCursor": result.get("nextCursor")})
+                return
+            if parsed.path == "/api/threads/hidden":
+                self.send_json({"threads": [{"id": key, "name": value.get("name") or "未命名对话"}
+                    for key, value in thread_visibility.snapshot().items() if value["hidden"]]})
                 return
             if parsed.path == "/api/thread-organizer":
                 self.send_json(thread_organizer.snapshot())
@@ -702,6 +709,20 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         parsed = urlparse(self.path)
         try:
+            if parsed.path in {"/api/threads/hide", "/api/threads/unhide"}:
+                if not self.require_auth(): return
+                origin = self.headers.get("Origin")
+                if origin and urlparse(origin).netloc != self.headers.get("Host"):
+                    self.send_json({"error": "origin_mismatch"}, 403); return
+                if not self.headers.get("Content-Type", "").startswith("application/json"):
+                    self.send_json({"error": "json_required"}, 415); return
+                size = int(self.headers.get("Content-Length") or 0)
+                if not 0 < size <= 4096: self.send_json({"error": "invalid_payload"}, 400); return
+                payload = json.loads(self.rfile.read(size))
+                if not isinstance(payload, dict) or not is_valid_thread_id(payload.get("threadId")):
+                    self.send_json({"error": "invalid_thread_id"}, 400); return
+                thread_visibility.set(payload["threadId"], parsed.path.endswith("/hide"), payload.get("name", ""))
+                self.send_json({"ok": True}); return
             if parsed.path == "/api/interactions/respond":
                 if not self.require_auth(): return
                 origin = self.headers.get("Origin")
@@ -1038,6 +1059,7 @@ def cloud_heartbeat_worker() -> None:
             response = requests.post(f"{base}/api/device/heartbeat",
                 headers={"Authorization": f"Bearer {token}"},
                 json={"modelSettings": model_choices.snapshot(False), "preferences":web_preferences(),
+                      "threadVisibility":thread_visibility.snapshot(),
                       "threadOrganizer":thread_organizer.snapshot(), "projects":codex_sidebar_projects(),
                       "voiceConfig":{**{key:voice_tts.settings(ROOT)[key] for key in ("voice","resource")},
                                      "configured":bool(all(voice_tts.settings(ROOT).values()))},
@@ -1049,6 +1071,7 @@ def cloud_heartbeat_worker() -> None:
             model_choices.merge(response.json().get("modelChoices") or {})
             merge_web_preferences(response.json().get("preferences") or {})
             thread_organizer.merge(response.json().get("threadOrganizer") or {})
+            thread_visibility.merge(response.json().get("threadVisibility") or {})
         except Exception as error:
             log(f"云端心跳暂时失败：{error}")
         time.sleep(10)
