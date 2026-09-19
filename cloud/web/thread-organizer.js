@@ -36,4 +36,3 @@
   document.querySelector('#close-organize-thread').onclick=()=>dialog.close();
   window.threadOrganizer=api;
 })();
-

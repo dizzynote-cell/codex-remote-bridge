@@ -198,7 +198,6 @@ class Interactions:
                 "turnId": text(params.get("turnId"), 200), "createdAt": time.time(), "status": "pending",
                 "wireId": message["id"], "method": method, "params": copy.deepcopy(params)}
             self.revision += 1
-
     def notice(self, params, message):
         with self.lock:
             thread = text(params.get("threadId"), 200); turn = text(params.get("turnId"), 200)
@@ -264,5 +263,4 @@ class Interactions:
             for e in self.entries.values():
                 if e["status"] == "pending": e.update(status="disconnected", closedAt=time.time())
             self.revision += 1
-
 

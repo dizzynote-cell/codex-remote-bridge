@@ -76,5 +76,3 @@ async function run(file) {
   assert.equal(fs.readFileSync(a,'utf8'),fs.readFileSync(b,'utf8'),'local/cloud interaction UI must stay identical');
   await run(a);await run(b);
 })().catch(error=>{console.error(error);process.exitCode=1;});
-
-

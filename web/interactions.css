@@ -13,4 +13,3 @@
 .interaction-actions button:disabled{opacity:.55;cursor:default}.interaction-card pre{max-height:180px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px}
 .interaction-card a{color:#225dba;overflow-wrap:anywhere}.interaction-card .interaction-delivery{color:#925409;font-size:13px}
 @media(max-width:600px){.interaction-list{max-height:43vh;padding:0 8px 8px}.interaction-card{padding:10px}.interaction-toggle{padding:10px 12px;font-size:14px}}
-

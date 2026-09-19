@@ -76,5 +76,3 @@ def exchange(db, payload):
     db.commit()
     rows = db.execute('SELECT payload FROM interaction_answers WHERE session=? ORDER BY created_at LIMIT 20', (snap['session'],)).fetchall()
     return {'answers': [json.loads(row[0]) for row in rows]}
-
-

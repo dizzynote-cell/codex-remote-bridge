@@ -31,5 +31,3 @@ def merge(db,incoming):
         if name and len(name)>100 or project and len(project)>500:continue
         db.execute('INSERT OR REPLACE INTO thread_organizer VALUES(?,?,?,?,?)',(thread_id,name,int(bool(item.get('pinned'))),project,updated))
     db.commit();return snapshot(db)
-
-

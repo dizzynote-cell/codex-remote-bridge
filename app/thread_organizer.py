@@ -42,5 +42,3 @@ class Organizer:
                 self.path.parent.mkdir(parents=True,exist_ok=True);temporary=self.path.with_suffix(".tmp")
                 temporary.write_text(json.dumps(data,ensure_ascii=False,indent=2),encoding="utf-8");os.replace(temporary,self.path)
             return {"threads":data}
-
-

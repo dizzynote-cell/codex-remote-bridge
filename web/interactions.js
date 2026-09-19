@@ -155,4 +155,3 @@
   window.bridgeInteractions = {poll};
   setInterval(poll, 2000); poll();
 })();
-
