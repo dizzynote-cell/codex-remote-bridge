@@ -130,11 +130,13 @@ class CloudTests(unittest.TestCase):
         # Exclude the server's final serve_forever invocation; bind a test-only port.
         tree.body = tree.body[:-1]
         cls.env = {"__file__": str(ROOT / "cloud/app.py"), "__name__": "cloud_test"}
+        sys.path.insert(0, str(ROOT / "cloud"))
         with patch.dict(os.environ, {"CODEX_HISTORY_DB": str(Path(cls.temp.name) / "history.db"),
                                     "PUBLIC_BASE_URL": "https://example.invalid",
                                     "FEISHU_APP_ID": "test", "FEISHU_APP_SECRET": "test",
                                     "FEISHU_OWNER_OPEN_ID": "test", "SYNC_TOKEN": "test-sync"}):
             exec(compile(tree, "<cloud-test>", "exec"), cls.env)
+        sys.path.pop(0)
         cls.env["SESSIONS"]["test-session"] = time.time() + 1000
         cls.server = cls.env["ThreadingHTTPServer"](("127.0.0.1", 0), cls.env["H"])
         cls.worker = threading.Thread(target=cls.server.serve_forever, daemon=True)

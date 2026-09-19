@@ -1,0 +1,16 @@
++/* SPDX-License-Identifier: MIT; Copyright (c) 2026 xiyannan */
+.interaction-panel{border-bottom:1px solid #d4dce7;background:#f3f7fc;color:#243247;flex-shrink:0}
+.interaction-panel[hidden],.interaction-list[hidden]{display:none!important}
+.interaction-toggle{width:100%;text-align:left;padding:12px 18px;border:0;background:transparent;color:inherit;font:inherit;font-weight:600;cursor:pointer}
+.interaction-list{max-height:45vh;overflow:auto;padding:0 12px 12px;overscroll-behavior:contain}
+.interaction-card{border:1px solid #ced9e9;border-left:4px solid #3976ce;border-radius:9px;padding:14px;margin:8px 0;background:#fff;display:block}
+.interaction-card.needs-pc{border-left-color:#d97a18;background:#fffaf2}
+.interaction-card h3{font-size:16px;margin:6px 0}.interaction-card p{white-space:pre-wrap;overflow-wrap:anywhere;margin:8px 0;font-size:14px}
+.interaction-card small,.interaction-help{color:#54647a}.interaction-card fieldset{border:0;padding:0;margin:12px 0;min-width:0}
+.interaction-card legend{font-size:14px;margin-bottom:6px;white-space:pre-wrap}.interaction-card label{display:block;margin:10px 0}
+.interaction-card textarea,.interaction-card input,.interaction-card select{box-sizing:border-box;width:100%;margin:6px 0;padding:9px;border:1px solid #b6c4d7;border-radius:6px;background:white;color:#243247;font:inherit;font-size:16px}
+.interaction-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}.interaction-actions button{padding:9px 12px;border:1px solid #9eb4d0;border-radius:6px;background:#edf4ff;color:#24466f;cursor:pointer;font:inherit}
+.interaction-actions button:disabled{opacity:.55;cursor:default}.interaction-card pre{max-height:180px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px}
+.interaction-card a{color:#225dba;overflow-wrap:anywhere}.interaction-card .interaction-delivery{color:#925409;font-size:13px}
+@media(max-width:600px){.interaction-list{max-height:43vh;padding:0 8px 8px}.interaction-card{padding:10px}.interaction-toggle{padding:10px 12px;font-size:14px}}
+

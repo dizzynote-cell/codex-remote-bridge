@@ -32,6 +32,7 @@ from urllib3.util.retry import Retry
 from lark_oapi.api.im.v1 import *
 from codex_rpc import CodexRpc
 import voice_tts
+from thread_organizer import Organizer
 
 ENV_FILE = ROOT / "config" / ".env"
 DATA_DIR = ROOT / "data"
@@ -42,6 +43,8 @@ WEB_INBOX_DIR = DATA_DIR / "web-inbox"
 STATE_FILE = DATA_DIR / "state.json"
 VOICE_DIR = DATA_DIR / "voice-cache"
 PREFERENCES_FILE = DATA_DIR / "web-preferences.json"
+ORGANIZER_FILE = DATA_DIR / "thread-organizer.json"
+CODEX_GLOBAL_STATE_FILE = Path.home() / ".codex" / ".codex-global-state.json"
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -70,6 +73,19 @@ def is_valid_thread_id(value: str) -> bool:
         return False
 
 
+def codex_sidebar_projects() -> list[dict]:
+    """Return the local projects shown in the current Codex sidebar order."""
+    try:
+        data = json.loads(CODEX_GLOBAL_STATE_FILE.read_text(encoding="utf-8"))
+        projects = data.get("local-projects") or {}; order = data.get("project-order") or []; result = []
+        for project_id in order:
+            project = projects.get(project_id) or {}; roots = project.get("rootPaths") or []
+            if roots and isinstance(roots[0], str):
+                result.append({"id": project_id, "name": str(project.get("name") or Path(roots[0]).name), "cwd": roots[0]})
+        return result
+    except (OSError, ValueError, TypeError): return []
+
+
 def load_state() -> dict:
     try:
         return json.loads(STATE_FILE.read_text(encoding="utf-8"))
@@ -86,6 +102,7 @@ codex_lock = threading.RLock()
 codex_rpc = CodexRpc()
 from model_choices import ModelChoices
 model_choices = ModelChoices(DATA_DIR, lambda: codex_rpc, codex_lock)
+thread_organizer = Organizer(ORGANIZER_FILE)
 active_turns: dict[str, str] = {}
 thread_message_locks: dict[str, threading.Lock] = {}
 thread_message_locks_guard = threading.Lock()
@@ -562,6 +579,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             if parsed.path.startswith("/api/") and not self.require_auth():
                 return
+            if parsed.path == "/api/interactions":
+                self.send_json({**codex_rpc.interactions.snapshot(), "available": not codex_rpc._closed}); return
             if parsed.path == "/api/models":
                 self.send_json(model_choices.snapshot())
                 return
@@ -573,12 +592,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 threads = result.get("data", [])
                 self.send_json({"threads": [{
                     "id": item.get("id"),
-                    "name": item.get("name") or "未命名对话",
+                    "name": thread_organizer.get(item.get("id")).get("name") or item.get("name") or "未命名对话",
                     "cwd": item.get("cwd"),
+                    "pinned": bool(thread_organizer.get(item.get("id")).get("pinned")),
+                    "projectOverride": thread_organizer.get(item.get("id")).get("project"),
                     "status": item.get("status"),
                     "preview": item.get("preview"),
                     "updatedAt": item.get("updatedAt"),
-                } for item in threads], "nextCursor": result.get("nextCursor")})
+                } for item in threads], "projects": codex_sidebar_projects(), "nextCursor": result.get("nextCursor")})
+                return
+            if parsed.path == "/api/thread-organizer":
+                self.send_json(thread_organizer.snapshot())
                 return
             if parsed.path == "/api/status":
                 self.send_json(bridge_mode())
@@ -678,6 +702,36 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         parsed = urlparse(self.path)
         try:
+            if parsed.path == "/api/interactions/respond":
+                if not self.require_auth(): return
+                origin = self.headers.get("Origin")
+                if origin and urlparse(origin).netloc != self.headers.get("Host"): self.send_json({"error": "origin_mismatch"}, 403); return
+                if not self.headers.get("Content-Type", "").startswith("application/json"): self.send_json({"error": "json_required"}, 415); return
+                size = int(self.headers.get("Content-Length") or 0)
+                if not 0 < size <= 64000: self.send_json({"error": "回答内容过大或为空"}, 400); return
+                try:
+                    payload = json.loads(self.rfile.read(size))
+                    if not isinstance(payload, dict): raise ValueError("回答格式错误")
+                    self.send_json(codex_rpc.interactions.respond(payload))
+                except (ValueError, RuntimeError) as error: self.send_json({"error": str(error)}, 409)
+                return
+            if parsed.path == "/api/thread-organizer":
+                if not self.require_auth(): return
+                size=int(self.headers.get("Content-Length") or 0)
+                if not 0<size<=16384:self.send_json({"error":"invalid_payload"},400);return
+                payload=json.loads(self.rfile.read(size));thread_id=str(payload.get("threadId") or "")
+                if not is_valid_thread_id(thread_id):self.send_json({"error":"invalid_thread_id"},400);return
+                name=payload.get("name")
+                if name is not None:
+                    name=str(name).strip()
+                    if not name or len(name)>100:self.send_json({"error":"invalid_name"},400);return
+                    with codex_lock:codex_rpc.call("thread/name/set",{"threadId":thread_id,"name":name})
+                project=payload.get("project")
+                if project is not None:
+                    project=str(project).strip()
+                    if len(project)>500:self.send_json({"error":"invalid_project"},400);return
+                item=thread_organizer.update(thread_id,name=name,pinned=payload.get("pinned") if "pinned" in payload else None,project=project if "project" in payload else None)
+                self.send_json({"ok":True,"item":item});return
             if parsed.path == "/api/auth/feishu":
                 size = min(int(self.headers.get("Content-Length") or 0), 8192)
                 payload = json.loads(self.rfile.read(size) or b"{}")
@@ -984,6 +1038,7 @@ def cloud_heartbeat_worker() -> None:
             response = requests.post(f"{base}/api/device/heartbeat",
                 headers={"Authorization": f"Bearer {token}"},
                 json={"modelSettings": model_choices.snapshot(False), "preferences":web_preferences(),
+                      "threadOrganizer":thread_organizer.snapshot(), "projects":codex_sidebar_projects(),
                       "voiceConfig":{**{key:voice_tts.settings(ROOT)[key] for key in ("voice","resource")},
                                      "configured":bool(all(voice_tts.settings(ROOT).values()))},
                       "working": bool(active_thread_ids) or bool(active_turns) or detected_recently,
@@ -993,6 +1048,7 @@ def cloud_heartbeat_worker() -> None:
             response.raise_for_status()
             model_choices.merge(response.json().get("modelChoices") or {})
             merge_web_preferences(response.json().get("preferences") or {})
+            thread_organizer.merge(response.json().get("threadOrganizer") or {})
         except Exception as error:
             log(f"云端心跳暂时失败：{error}")
         time.sleep(10)
@@ -1014,6 +1070,30 @@ def cloud_task_report(task_id: str, kind: str, payload: dict, status: str | None
     response = http.post(f"{base}/api/device/tasks/{task_id}",
                          headers={"Authorization": f"Bearer {token}"}, json=body, timeout=(10, 30))
     response.raise_for_status()
+
+
+def cloud_interactions_worker() -> None:
+    """A separate lane: a blocked task must not block the answer that releases it."""
+    base = cloud_base_url(); token = (os.getenv("CODEX_HISTORY_SYNC_TOKEN") or "").strip()
+    if not base or not token: return
+    acks = []
+    while True:
+        delay = 2
+        try:
+            response = requests.post(f"{base}/api/device/interactions", headers={"Authorization": f"Bearer {token}"},
+                json={"snapshot": codex_rpc.interactions.snapshot(), "acks": acks}, timeout=(5, 10))
+            if response.status_code == 404: delay = 30
+            else:
+                response.raise_for_status(); acks = []
+                for answer in response.json().get("answers") or []:
+                    ack = {"session": answer.get("session"), "id": answer.get("id")}
+                    try: codex_rpc.interactions.respond(answer)
+                    except (ValueError, RuntimeError): ack["error"] = "回答未被接受：请求可能已结束，或答案格式不符。请刷新后重试。"
+                    acks.append(ack)
+        except Exception:
+            # Never log answer bodies, verification details, or authorization URLs.
+            delay = 5
+        time.sleep(delay)
 
 
 def download_cloud_task_files(task: dict) -> list[Path]:
@@ -1075,6 +1155,12 @@ def execute_cloud_task(task: dict) -> None:
             outcome=result.get("outcome") or "unknown"
             cloud_task_report(task_id,"completed",{"message":outcome},"completed",result=outcome)
             return
+        if operation == "rename_thread":
+            thread_id=str(task.get("threadId") or "");name=str(task.get("title") or "").strip()
+            if not is_valid_thread_id(thread_id) or not name:raise RuntimeError("重命名请求无效")
+            with codex_lock:codex_rpc.call("thread/name/set",{"threadId":thread_id,"name":name})
+            thread_organizer.update(thread_id,name=name)
+            cloud_task_report(task_id,"completed",{"message":"对话已重命名"},"completed",result=name);return
         if operation == "new_thread":
             cloud_task_report(task_id, "status", {"message": "正在创建新对话"}, "running")
             cwd = Path(str(task.get("cwd") or "").strip())
@@ -1709,6 +1795,7 @@ def main() -> None:
     threading.Thread(target=model_catalog_worker, daemon=True).start()
     threading.Thread(target=cloud_heartbeat_worker, daemon=True).start()
     threading.Thread(target=cloud_task_worker, daemon=True).start()
+    threading.Thread(target=cloud_interactions_worker, daemon=True).start()
     start_dashboard()
     log("正在连接飞书开放平台……")
     ws_client = lark.ws.Client(

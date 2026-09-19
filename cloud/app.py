@@ -4,6 +4,8 @@
 # Repository: https://github.com/dizzynote-cell/codex-remote-bridge
 
 import base64, binascii, hashlib, json, os, re, secrets, shutil, sqlite3, time, uuid
+import interactions
+import thread_organizer
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -184,6 +186,8 @@ class H(BaseHTTPRequestHandler):
             if not f.is_file():return self.send_error(404)
             b=f.read_bytes(); self.send_response(200); self.send_header('Content-Type',row[1] or 'application/octet-stream'); self.send_header('Content-Length',str(len(b))); self.send_header('X-File-Name',quote(row[0])); self.end_headers(); self.wfile.write(b); return
         if p.path.startswith('/api/') and not self.authed():return self.json({'error':'feishu_login_required'},401)
+        if p.path=='/api/interactions':
+            with DB_LOCK:return self.json(interactions.read(db))
         if p.path=='/api/models':return self.json(model_settings())
         if p.path=='/api/preferences':
             row=db.execute("SELECT value FROM meta WHERE key='web_preferences'").fetchone()
@@ -240,8 +244,10 @@ class H(BaseHTTPRequestHandler):
             rows=db.execute('SELECT id,kind,payload,created_at FROM task_events WHERE task_id=? AND id>? ORDER BY id',(task_id,after)).fetchall()
             return self.json({'events':[{'id':r[0],'kind':r[1],'payload':json.loads(r[2]),'createdAt':r[3]} for r in rows]})
         if p.path=='/api/threads':
-            rows=db.execute('SELECT id,name,cwd,status,preview,updated_at,synced_at FROM threads WHERE id NOT IN (SELECT thread_id FROM hidden_threads) ORDER BY CAST(updated_at AS REAL) DESC').fetchall()
-            return self.json({'threads':[{'id':r[0],'name':r[1],'cwd':r[2],'status':r[3],'preview':r[4],'updatedAt':r[5],'syncedAt':r[6]} for r in rows],'nextCursor':None})
+            rows=db.execute('SELECT t.id,COALESCE(o.name,t.name),t.cwd,t.status,t.preview,t.updated_at,t.synced_at,COALESCE(o.pinned,0),o.project FROM threads t LEFT JOIN thread_organizer o ON o.thread_id=t.id WHERE t.id NOT IN (SELECT thread_id FROM hidden_threads) ORDER BY CAST(t.updated_at AS REAL) DESC').fetchall()
+            projects_row=db.execute("SELECT value FROM meta WHERE key='codex_projects'").fetchone();projects=json.loads(projects_row[0]) if projects_row else []
+            return self.json({'threads':[{'id':r[0],'name':r[1],'cwd':r[2],'status':r[3],'preview':r[4],'updatedAt':r[5],'syncedAt':r[6],'pinned':bool(r[7]),'projectOverride':r[8]} for r in rows],'projects':projects,'nextCursor':None})
+        if p.path=='/api/thread-organizer':return self.json(thread_organizer.snapshot(db))
         if p.path=='/api/threads/hidden':
             rows=db.execute('SELECT t.id,t.name,t.cwd,h.hidden_at FROM hidden_threads h LEFT JOIN threads t ON t.id=h.thread_id ORDER BY h.hidden_at DESC').fetchall()
             return self.json({'threads':[{'id':r[0],'name':r[1] or '未命名对话','cwd':r[2],'hiddenAt':r[3]} for r in rows]})
@@ -275,6 +281,25 @@ class H(BaseHTTPRequestHandler):
             return self._do_POST()
     def _do_POST(self):
         p=urlparse(self.path); n=min(int(self.headers.get('Content-Length') or 0),24*1024*1024); body=self.rfile.read(n)
+        if p.path=='/api/device/interactions':
+            if not secrets.compare_digest(self.headers.get('Authorization') or '',f'Bearer {SYNC_TOKEN}'):return self.json({'error':'unauthorized'},401)
+            try:return self.json(interactions.exchange(db,json.loads(body or b'{}')))
+            except (ValueError,TypeError,KeyError):return self.json({'error':'invalid_interaction_payload'},400)
+        if p.path=='/api/interactions/respond':
+            if not self.authed():return self.json({'error':'feishu_login_required'},401)
+            origin=self.headers.get('Origin')
+            if origin and urlparse(origin).netloc!=self.headers.get('Host'):return self.json({'error':'origin_mismatch'},403)
+            if not self.headers.get('Content-Type','').startswith('application/json'):return self.json({'error':'json_required'},415)
+            try:return self.json(interactions.submit(db,json.loads(body or b'{}')),202)
+            except (ValueError,TypeError,KeyError) as error:return self.json({'error':str(error)},409)
+        if p.path=='/api/thread-organizer':
+            if not self.authed():return self.json({'error':'feishu_login_required'},401)
+            try:
+                data=json.loads(body or b'{}');item=thread_organizer.update(db,data);task_id=None
+                if 'name' in data:
+                    task_id=uuid.uuid4().hex;now=int(time.time());db.execute('INSERT INTO tasks(id,op,thread_id,title,source,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)',(task_id,'rename_thread',data['threadId'],item['name'],'web','queued',now,now));db.commit()
+                return self.json({'ok':True,'item':item,'taskId':task_id},202 if task_id else 200)
+            except (ValueError,TypeError,KeyError) as error:return self.json({'error':str(error)},400)
         if p.path=='/api/device/heartbeat':
             if not secrets.compare_digest(self.headers.get('Authorization') or '',f'Bearer {SYNC_TOKEN}'):return self.json({'error':'unauthorized'},401)
             data=json.loads(body or b'{}');now=int(time.time());active_ids=[str(x) for x in (data.get('activeThreadIds') or []) if valid_thread_id(x)][:20];runtime={'working':bool(data.get('working')),'activeThreadIds':active_ids,'historySyncAge':data.get('historySyncAge'),'historyError':str(data.get('historyError') or '')[:300],'updatedAt':now}
@@ -292,7 +317,12 @@ class H(BaseHTTPRequestHandler):
                     'resource':str(voice_config.get('resource') or '')[:100],
                     'configured':bool(voice_config.get('configured') and voice_config.get('voice') and voice_config.get('resource'))}
                 db.execute("INSERT INTO meta VALUES('voice_config',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(json.dumps(safe),))
-            db.commit();settings=merge_model_settings(data.get('modelSettings') or {});return self.json({'ok':True,'modelChoices':settings['choices'],'preferences':current})
+            organizer=thread_organizer.merge(db,data.get('threadOrganizer') or {})
+            projects=data.get('projects') or []
+            if isinstance(projects,list):
+                projects=[{'id':str(item.get('id') or '')[:100],'name':str(item.get('name') or '')[:100],'cwd':str(item.get('cwd') or '')[:500]} for item in projects if isinstance(item,dict) and item.get('cwd')][:100]
+                db.execute("INSERT INTO meta VALUES('codex_projects',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(json.dumps(projects,ensure_ascii=False),))
+            db.commit();settings=merge_model_settings(data.get('modelSettings') or {});return self.json({'ok':True,'modelChoices':settings['choices'],'preferences':current,'threadOrganizer':organizer})
         if p.path.startswith('/api/device/output-files/'):
             if not secrets.compare_digest(self.headers.get('Authorization') or '',f'Bearer {SYNC_TOKEN}'):return self.json({'error':'unauthorized'},401)
             file_id=unquote(p.path.split('/api/device/output-files/',1)[1]);name=unquote(self.headers.get('X-File-Name') or 'file');mime=self.headers.get('X-File-Mime') or 'application/octet-stream'
@@ -444,6 +474,8 @@ import history_store
 DB_LOCK=__import__('threading').RLock()
 HISTORY_LOCK=DB_LOCK
 history_store.initialize(db)
+interactions.initialize(db)
+thread_organizer.initialize(db)
 with DB_LOCK:trim_voice()
 __import__('threading').Thread(target=voice_housekeeper,daemon=True).start()
 ThreadingHTTPServer(('127.0.0.1',8780),H).serve_forever()

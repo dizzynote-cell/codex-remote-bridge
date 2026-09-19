@@ -27,6 +27,7 @@
     </div>
   </section>
   <main class="shell">
+    <dialog id="organize-thread-dialog" class="organize-thread-dialog"><form id="organize-thread-form"><header><strong>整理对话</strong><button id="close-organize-thread" type="button">×</button></header><label>对话名称<input id="organize-thread-name" type="text" maxlength="100" required></label><label class="pin-row"><input id="organize-thread-pin" type="checkbox"> 在所属分类中置顶</label><label>项目分类<select id="organize-thread-project"></select></label><footer><button id="cancel-organize-thread" type="button">取消</button><button type="submit" class="primary">保存</button></footer></form></dialog>
     <dialog id="new-thread-dialog" class="new-thread-dialog">
       <form id="new-thread-form" method="dialog">
         <header><strong>新建对话</strong><button id="close-new-thread" type="button">×</button></header>
@@ -75,7 +76,11 @@
   <script src="https://lf-scm-cn.feishucdn.com/lark/op/h5-js-sdk-1.5.44.js"></script>
   <script src="/model-picker.js?v=20260915-label"></script>
   <script src="/voice-ui.js?v=20260916-voice-dock"></script>
-  <script src="/app.js?v=20260916-voice"></script>
+  <link rel="stylesheet" href="/thread-organizer.css?v=20260920">
+  <script src="/thread-organizer.js?v=20260920-projects"></script>
+  <script src="/app.js?v=20260920-projects"></script>
   <script src="/local-composer.js?v=20260915-active-sync"></script>
+  <link rel="stylesheet" href="/interactions.css?v=20260919">
+  <script src="/interactions.js?v=20260919"></script>
 </body>
 </html>
