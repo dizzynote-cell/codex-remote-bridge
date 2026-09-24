@@ -160,9 +160,16 @@ def account_quota() -> dict:
     result = codex_rpc.call("account/rateLimits/read", {}, timeout=10)
     snapshot = result.get("rateLimits") or {}
     primary = snapshot.get("primary") or {}
+    secondary = snapshot.get("secondary") or {}
     used = max(0, min(100, int(primary.get("usedPercent") or 0)))
+    weekly_used = max(0, min(100, int(secondary.get("usedPercent") or 0)))
     return {"available": bool(primary), "usedPercent": used, "remainingPercent": 100 - used,
-            "resetsAt": primary.get("resetsAt"), "planType": snapshot.get("planType"),
+            "resetsAt": primary.get("resetsAt"), "windowDurationMins": primary.get("windowDurationMins"),
+            "weeklyAvailable": bool(secondary), "weeklyUsedPercent": weekly_used,
+            "weeklyRemainingPercent": 100 - weekly_used if secondary else None,
+            "weeklyResetsAt": secondary.get("resetsAt"),
+            "weeklyWindowDurationMins": secondary.get("windowDurationMins"),
+            "planType": snapshot.get("planType"),
             "resetCredits": (result.get("rateLimitResetCredits") or {}).get("availableCount")
             if result.get("rateLimitResetCredits") is not None else None}
 
