@@ -827,7 +827,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 if not is_valid_thread_id(thread_id):
                     self.send_json({"error": "invalid_thread_id"}, 400)
                     return
-                model_choices.choose(thread_id, payload.get("model"), effort=payload.get("effort"))
+                model_choices.choose(thread_id, payload.get("model"), effort=payload.get("effort"),
+                                     service_tier=payload.get("serviceTier"))
                 self.send_json(model_choices.snapshot(False))
                 return
             if parsed.path == "/api/preferences":
@@ -889,14 +890,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     model_choices.validate(requested_model)
                     if payload.get("effort"):
                         model_choices.validate_effort(requested_model, payload["effort"])
+                    if payload.get("serviceTier") is not None:
+                        model_choices.validate_tier(requested_model, payload["serviceTier"])
                     if operation != "new_thread" and is_valid_thread_id(thread_id) and not payload.get("followDefaults"):
-                        model_choices.choose(thread_id, requested_model, effort=payload.get("effort"))
+                        model_choices.choose(thread_id, requested_model, effort=payload.get("effort"),
+                                             service_tier=payload.get("serviceTier"))
                 task_id = secrets.token_urlsafe(12)
                 with local_web_tasks_lock:
                     local_web_tasks[task_id] = {"id": task_id, "status": "queued", "message": "已提交到本机桥"}
                 threading.Thread(target=execute_local_web_task,
                                  args=(task_id, thread_id, text, payload.get("files") or [], operation,
-                                       str(payload.get("cwd") or ""), str(payload.get("title") or ""), requested_model, payload.get("effort"), bool(payload.get("followDefaults"))), daemon=True).start()
+                                       str(payload.get("cwd") or ""), str(payload.get("title") or ""), requested_model, payload.get("effort"), bool(payload.get("followDefaults")), payload.get("serviceTier")), daemon=True).start()
                 self.send_json({"taskId": task_id})
                 return
             self.send_error(404)
@@ -915,7 +919,7 @@ def set_local_web_task(task_id: str, **values) -> None:
 
 
 def execute_local_web_task(task_id: str, thread_id: str, text: str, files: list,
-                           operation: str = "message", cwd_value: str = "", title: str = "", requested_model=None, requested_effort=None, follow_defaults=False) -> None:
+                           operation: str = "message", cwd_value: str = "", title: str = "", requested_model=None, requested_effort=None, follow_defaults=False, requested_service_tier=None) -> None:
     """Run a localhost UI request without requiring the cloud relay."""
     try:
         if operation == "new_thread":
@@ -936,7 +940,8 @@ def execute_local_web_task(task_id: str, thread_id: str, text: str, files: list,
         if not is_valid_thread_id(thread_id):
             raise RuntimeError("所选条目不是有效的 Codex 对话，请刷新列表后重新选择")
         if requested_model and operation == "new_thread" and not follow_defaults:
-            model_choices.choose(thread_id, requested_model, effort=requested_effort)
+            model_choices.choose(thread_id, requested_model, effort=requested_effort,
+                                 service_tier=requested_service_tier)
         saved_files = []
         day_dir = WEB_INBOX_DIR / datetime.now().strftime("%Y-%m-%d")
         day_dir.mkdir(parents=True, exist_ok=True)
@@ -979,7 +984,8 @@ def execute_local_web_task(task_id: str, thread_id: str, text: str, files: list,
             previous_turn_ids = {turn.get("id") for turn in before.get("turns", [])}
             codex_rpc.call("thread/resume", {"threadId": thread_id, "sandbox": "danger-full-access",
                                              "approvalPolicy": "never"})
-            result = model_choices.start(thread_id, codex_input, requested_model, effort=requested_effort)
+            result = model_choices.start(thread_id, codex_input, requested_model, effort=requested_effort,
+                                         service_tier=requested_service_tier)
             turn_id = (result.get("turn") or {}).get("id")
             if turn_id:
                 active_turns[thread_id] = turn_id
@@ -1223,8 +1229,10 @@ def execute_cloud_task(task: dict) -> None:
             raise RuntimeError("所选条目不是有效的 Codex 对话，请刷新列表后重新选择")
         requested_model = task.get("model")
         requested_effort = task.get("effort")
+        requested_service_tier = task.get("serviceTier")
         if requested_model and not task.get("followDefaults"):
-            model_choices.choose(thread_id, requested_model, task.get("modelUpdated"), effort=requested_effort)
+            model_choices.choose(thread_id, requested_model, task.get("modelUpdated"), effort=requested_effort,
+                                 service_tier=requested_service_tier)
         local_files = download_cloud_task_files(task)
         if local_files:
             text += "\n\n我从网页端上传了以下本机临时文件，请读取并处理：\n" + "\n".join(str(path) for path in local_files)
@@ -1255,7 +1263,8 @@ def execute_cloud_task(task: dict) -> None:
             previous_turn_ids = {turn.get("id") for turn in before.get("turns", [])}
             codex_rpc.call("thread/resume", {"threadId": thread_id, "sandbox": "danger-full-access",
                                              "approvalPolicy": "never"})
-            result = model_choices.start(thread_id, codex_input, requested_model, effort=requested_effort)
+            result = model_choices.start(thread_id, codex_input, requested_model, effort=requested_effort,
+                                         service_tier=requested_service_tier)
             turn_id = (result.get("turn") or {}).get("id")
             if turn_id:
                 active_turns[thread_id] = turn_id

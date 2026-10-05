@@ -87,19 +87,30 @@ def valid_effort(model,effort):
     entry=next((m for m in model_settings()['models'] if m['model']==model),{})
     return effort in {e['reasoningEffort'] for e in entry.get('supportedReasoningEfforts',[])}
 
+def valid_service_tier(model,tier):
+    if tier=='default':return True
+    entry=next((m for m in model_settings()['models'] if m['model']==model),{})
+    return tier in ({item.get('id') for item in entry.get('serviceTiers',[])} | set(entry.get('additionalSpeedTiers',[])))
+
 def merge_model_settings(incoming):
     with MODEL_LOCK:
         saved=model_settings()
         if incoming.get('models'):
             saved['models']=incoming['models']
+            saved['speedModeSupported']=incoming.get('speedModeSupported') is True
         if incoming.get('defaults'):saved['defaults']=incoming['defaults']
         allowed={m['model'] for m in saved['models']}
         for thread_id,choice in (incoming.get('choices') or {}).items():
             if not valid_thread_id(thread_id) or not isinstance(choice,dict):continue
             stamp=choice.get('updated')
             if (choice.get('model') is not None and choice.get('model') not in allowed) or not isinstance(stamp,(float,int)) or not 0<stamp<time.time()+60:continue
+            tier=choice.get('serviceTier')
+            entry=next((m for m in saved['models'] if m['model']==choice.get('model')), {})
+            tiers={item.get('id') for item in entry.get('serviceTiers',[])} | set(entry.get('additionalSpeedTiers',[]))
+            if tier is not None and tier!='default' and tier not in tiers:continue
             if stamp>saved['choices'].get(thread_id,{}).get('updated',0):
-                saved['choices'][thread_id]={'model':choice.get('model'),'effort':choice.get('effort'),'updated':stamp}
+                saved['choices'][thread_id]={'model':choice.get('model'),'effort':choice.get('effort'),
+                                             'serviceTier':tier,'updated':stamp}
         db.execute("INSERT INTO meta VALUES('model_settings',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(json.dumps(saved),))
         db.commit()
         return saved
@@ -168,6 +179,7 @@ class H(BaseHTTPRequestHandler):
             task['model']=choice.get('model')
             task['modelUpdated']=choice.get('updated')
             task['effort']=choice.get('effort')
+            task['serviceTier']=choice.get('serviceTier')
             task['followDefaults']=choice.get('followDefaults',False)
             return self.json({'task':task})
         if p.path=='/api/device/storage':
@@ -431,7 +443,9 @@ class H(BaseHTTPRequestHandler):
             if model and model not in {m['model'] for m in model_settings()['models']}:return self.json({'error':'模型不可用，请等待本机同步模型列表'},400)
             effort=data.get('effort')
             if model and effort and not valid_effort(model,effort):return self.json({'error':'该模型不支持此推理强度'},400)
-            return self.json(merge_model_settings({'choices':{thread_id:{'model':model,'effort':effort,'updated':time.time()}}}))
+            tier=data.get('serviceTier')
+            if model and tier is not None and not valid_service_tier(model,tier):return self.json({'error':'该模型不支持此速度模式'},400)
+            return self.json(merge_model_settings({'choices':{thread_id:{'model':model,'effort':effort,'serviceTier':tier,'updated':time.time()}}}))
         if p.path=='/api/tasks':
             if not self.authed():return self.json({'error':'feishu_login_required'},401)
             data=json.loads(body or b'{}'); op=str(data.get('op') or 'message'); thread_id=str(data.get('threadId') or '').strip(); text=str(data.get('text') or '').strip(); title=str(data.get('title') or '').strip(); cwd=str(data.get('cwd') or '').strip()
@@ -442,6 +456,8 @@ class H(BaseHTTPRequestHandler):
             if model and model not in {m['model'] for m in model_settings()['models']}:return self.json({'error':'模型不可用，请刷新模型列表'},400)
             effort=data.get('effort')
             if model and effort and not valid_effort(model,effort):return self.json({'error':'该模型不支持此推理强度'},400)
+            tier=data.get('serviceTier')
+            if model and tier is not None and not valid_service_tier(model,tier):return self.json({'error':'该模型不支持此速度模式'},400)
             incoming=data.get('files') or []
             if len(incoming)>3:return self.json({'error':'too_many_files'},400)
             decoded=[]; total=0
@@ -454,8 +470,8 @@ class H(BaseHTTPRequestHandler):
             except (ValueError,binascii.Error) as error:return self.json({'error':str(error)},400)
             task_id=uuid.uuid4().hex; now=int(time.time()); db.execute('INSERT INTO tasks(id,op,thread_id,title,cwd,text,source,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)',(task_id,op,thread_id or None,title or None,cwd or None,text or None,'web','queued',now,now))
             if model:
-                db.execute('INSERT OR REPLACE INTO meta VALUES(?,?)',('task_model:'+task_id,json.dumps({'model':model,'effort':effort,'followDefaults':bool(data.get('followDefaults')),'updated':time.time()})))
-                if thread_id and not data.get('followDefaults'):merge_model_settings({'choices':{thread_id:{'model':model,'effort':effort,'updated':time.time()}}})
+                db.execute('INSERT OR REPLACE INTO meta VALUES(?,?)',('task_model:'+task_id,json.dumps({'model':model,'effort':effort,'serviceTier':tier,'followDefaults':bool(data.get('followDefaults')),'updated':time.time()})))
+                if thread_id and not data.get('followDefaults'):merge_model_settings({'choices':{thread_id:{'model':model,'effort':effort,'serviceTier':tier,'updated':time.time()}}})
             for name,mime,raw in decoded:
                 file_id=uuid.uuid4().hex; path=UPLOADS/f'{file_id}{Path(name).suffix.lower()}'; path.write_bytes(raw); db.execute('INSERT INTO task_files VALUES(?,?,?,?,?,?,?)',(file_id,task_id,name,mime,len(raw),str(path),now))
             db.execute('INSERT INTO task_events(task_id,kind,payload,created_at) VALUES(?,?,?,?)',(task_id,'queued',json.dumps({'message':'已提交，等待本机桥接收','files':[x[0] for x in decoded]},ensure_ascii=False),now)); db.commit(); return self.json({'ok':True,'taskId':task_id,'status':'queued'},202)

@@ -25,3 +25,11 @@ class VisibilityTests(unittest.TestCase):
             store=module.Visibility(Path(temp)/'state.json')
             with self.assertRaises(ValueError):store.set('invalid',True)
             self.assertEqual(store.snapshot(),{})
+
+    def test_corrupt_visibility_file_does_not_break_thread_listing(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path=Path(temp)/'state.json'
+            path.write_bytes(b'\x00\x00')
+            store=module.Visibility(path)
+            self.assertEqual(store.snapshot(),{})
+            self.assertEqual(path.read_bytes(),b'\x00\x00')

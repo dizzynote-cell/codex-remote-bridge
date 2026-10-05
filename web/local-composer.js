@@ -3,6 +3,21 @@ const localShowTask=(message,error=false)=>{localTaskStrip.hidden=!message;local
 const localFileData=file=>new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve({name:file.name,mime:file.type||'application/octet-stream',data:String(reader.result).split(',',2)[1]||''});reader.onerror=()=>reject(reader.error);reader.readAsDataURL(file);});
 function clearLocalFiles(){localFiles.value='';localFileList.hidden=true;localFileList.innerHTML='';}
 localFiles.onchange=()=>{const files=[...localFiles.files];localFileList.hidden=!files.length;if(!files.length)return;localFileList.innerHTML=`<span>待发送：${files.map(file=>`${esc(file.name)}（${(file.size/1024/1024).toFixed(1)} MB）`).join('、')} · 可继续填写描述</span><button type="button">取消附件</button>`;localFileList.querySelector('button').onclick=clearLocalFiles;};
+document.addEventListener('paste',event=>{
+  if(!selected||!event.clipboardData)return;
+  const target=event.target;
+  if(target!==localPrompt&&target!==document.body&&!localComposer.contains(target))return;
+  const imageTypes={'image/png':'png','image/jpeg':'jpg','image/webp':'webp','image/gif':'gif','image/bmp':'bmp'};
+  const pasted=[...event.clipboardData.items].filter(item=>item.kind==='file'&&imageTypes[item.type]).map(item=>item.getAsFile()).filter(Boolean);
+  if(!pasted.length)return;
+  event.preventDefault();
+  const existing=[...localFiles.files],all=[...existing,...pasted];
+  if(all.length>3||all.some(file=>file.size>10*1024*1024)||all.reduce((sum,file)=>sum+file.size,0)>15*1024*1024){localShowTask('附件限制：最多3个，单文件10 MB，单次总计15 MB',true);return;}
+  const transfer=new DataTransfer(),stamp=new Date().toISOString().replace(/[:.]/g,'-');
+  existing.forEach(file=>transfer.items.add(file));
+  pasted.forEach((file,index)=>transfer.items.add(new File([file],`截图-${stamp}${pasted.length>1?`-${index+1}`:''}.${imageTypes[file.type]}`,{type:file.type})));
+  localFiles.files=transfer.files;localFiles.onchange();localShowTask('截图已添加，点击发送');
+});
 localPrompt.oninput=()=>{localPrompt.style.height='auto';localPrompt.style.height=Math.min(localPrompt.scrollHeight,180)+'px';};
 localPrompt.onkeydown=event=>{if(event.key==='Enter'&&(event.ctrlKey||event.metaKey)){event.preventDefault();localComposer.requestSubmit(localSend);}};
 async function responseJson(response){const type=response.headers.get('content-type')||'';if(!type.includes('application/json'))throw new Error(response.status===404?'本地输入接口尚未加载，请重启桥后刷新网页':'本地桥返回了无法识别的响应');return response.json();}

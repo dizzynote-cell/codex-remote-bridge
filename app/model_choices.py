@@ -53,13 +53,15 @@ class ModelChoices:
         with self.lock:
             self.defaults = {"model": config.get("model"), "effort": config.get("model_reasoning_effort"), "source": "Codex 本机配置"}
             self.defaults_checked = time.time()
+            self.defaults["serviceTier"] = config.get("service_tier")
 
     def snapshot(self, refresh=True):
         if refresh:
             self.models()
             self.read_defaults()
         with self.lock:
-            return {"models": list(self.catalog), "choices": dict(self.data["choices"]), "defaults": dict(self.defaults)}
+            return {"models": list(self.catalog), "choices": dict(self.data["choices"]),
+                    "defaults": dict(self.defaults), "speedModeSupported": True}
 
     def validate(self, model):
         if model not in {m["model"] for m in self.models()}:
@@ -73,12 +75,26 @@ class ModelChoices:
             raise ValueError("该模型不支持所选推理强度，请重新选择")
         return effort
 
-    def choose(self, thread_id, model, updated=None, effort=None):
+    def validate_tier(self, model, tier):
+        if tier == "default":
+            return tier
+        self.validate(model)
+        entry = next(m for m in self.models() if m["model"] == model)
+        supported = {item.get("id") for item in entry.get("serviceTiers", [])}
+        supported.update(entry.get("additionalSpeedTiers", []))
+        if tier not in supported:
+            raise ValueError("该模型不支持所选快速模式，请刷新模型列表")
+        return tier
+
+    def choose(self, thread_id, model, updated=None, effort=None, service_tier=None):
         if model:
             self.validate(model)
             if effort:
                 self.validate_effort(model, effort)
-        self.merge({thread_id: {"model": model, "effort": effort, "updated": updated or time.time()}})
+            if service_tier is not None:
+                self.validate_tier(model, service_tier)
+        self.merge({thread_id: {"model": model, "effort": effort, "serviceTier": service_tier,
+                                "updated": updated or time.time()}})
 
     def merge(self, choices):
         # Heartbeats must not wait on Codex RPC. Validate against the cached catalog.
@@ -88,16 +104,24 @@ class ModelChoices:
             for thread_id, choice in choices.items():
                 if not isinstance(choice, dict) or (choice.get("model") is not None and choice.get("model") not in allowed):
                     continue
+                model = choice.get("model")
+                tier = choice.get("serviceTier")
+                entry = next((m for m in self.catalog if m["model"] == model), {})
+                supported = {item.get("id") for item in entry.get("serviceTiers", [])}
+                supported.update(entry.get("additionalSpeedTiers", []))
+                if tier is not None and tier != "default" and tier not in supported:
+                    continue
                 stamp = choice.get("updated")
                 if not isinstance(stamp, (int, float)) or not 0 < stamp < time.time() + 60:
                     continue
                 if stamp > self.data["choices"].get(thread_id, {}).get("updated", 0):
-                    self.data["choices"][thread_id] = {"model": choice.get("model"), "effort": choice.get("effort"), "updated": stamp}
+                    self.data["choices"][thread_id] = {"model": model, "effort": choice.get("effort"),
+                                                       "serviceTier": tier, "updated": stamp}
                     changed = True
             if changed:
                 self.save()
 
-    def start(self, thread_id, codex_input, requested=None, fallback=None, effort=None):
+    def start(self, thread_id, codex_input, requested=None, fallback=None, effort=None, service_tier=None):
         models = self.models()
         self.read_defaults()
         with self.lock:
@@ -105,11 +129,19 @@ class ModelChoices:
         model = requested or choice.get("model") or self.defaults.get("model") or fallback
         entry = next((m for m in models if m["model"] == model), {})
         effort = effort or (choice.get("effort") if choice.get("model") == model else None) or (self.defaults.get("effort") if self.defaults.get("model") == model else None) or entry.get("defaultReasoningEffort")
+        tier = (service_tier if service_tier is not None else
+                choice.get("serviceTier") if choice.get("model") == model and choice.get("serviceTier") is not None else
+                self.defaults.get("serviceTier") if self.defaults.get("model") == model else None)
         self.validate(model)
         self.validate_effort(model, effort)
-        result = self.rpc().call("turn/start", {"threadId": thread_id, "input": codex_input, "model": model, "effort": effort})
+        if tier is not None:
+            self.validate_tier(model, tier)
+        params = {"threadId": thread_id, "input": codex_input, "model": model, "effort": effort}
+        if tier is not None:
+            params["serviceTierForTurn"] = tier
+        result = self.rpc().call("turn/start", params)
         turn = result.get("turn") or {}
-        record = {"requested": model, "effort": effort, "actual": turn.get("model")}
+        record = {"requested": model, "effort": effort, "serviceTier": tier, "actual": turn.get("model")}
         if turn.get("id"):
             with self.lock:
                 self.data["turns"][turn["id"]] = record

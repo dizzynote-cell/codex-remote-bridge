@@ -19,8 +19,11 @@ class Visibility:
 
     def snapshot(self):
         with self.lock:
-            try: return json.loads(self.path.read_text(encoding='utf-8'))
+            try:
+                data = json.loads(self.path.read_text(encoding='utf-8'))
+                return data if isinstance(data, dict) else {}
             except FileNotFoundError: return {}
+            except (json.JSONDecodeError, UnicodeDecodeError): return {}
 
     def merge(self, incoming):
         with self.lock:
