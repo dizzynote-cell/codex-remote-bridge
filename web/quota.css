@@ -19,7 +19,10 @@
   line-height: 1.2;
   white-space: nowrap;
 }
-.quota .quota-bars { display: grid; gap: 4px; }
+.quota .quota-bars {
+  display: grid;
+  gap: 4px;
+}
 .quota .quota-track {
   display: block;
   width: 100%;
@@ -57,7 +60,11 @@
   border-radius: 3px;
   background: #303740;
 }
-.quota-detail-bar i { display: block; height: 100%; background: var(--accent); }
+.quota-detail-bar i {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+}
 .quota-detail-section.weekly .quota-detail-bar { background: #4a242b; }
 .quota-detail-section.weekly .quota-detail-bar i { background: #ff6b78; }
 .quota-details .quota-detail-reset { color: var(--muted); }

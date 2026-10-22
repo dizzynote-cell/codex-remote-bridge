@@ -14,6 +14,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "app"))
 from model_choices import ModelChoices
+from turn_routing import steer_or_idle, release_owned
 
 THREAD = "11111111-1111-4111-8111-111111111111"
 MODELS = [{"model": name, "isDefault": name == "test-a", "defaultReasoningEffort": "low",
@@ -113,7 +114,9 @@ class ModelTests(unittest.TestCase):
                    model_choices=self.settings, WEB_INBOX_DIR=Path(self.temp.name),
                    set_local_web_task=lambda *a, **kw: updates.append(kw),
                    codex_lock=threading.RLock(), active_turns={THREAD: "running-turn"},
-                   codex_rpc=self.rpc, log=lambda _: None)
+                   codex_rpc=self.rpc, log=lambda _: None,
+                   steer_or_idle=steer_or_idle, release_owned=release_owned,
+                   read_thread=lambda _: {"id": THREAD, "turns": [{"id": "running-turn", "status": "inProgress"}]})
         exec(compile(ast.Module(body=[node], type_ignores=[]), "<executor-test>", "exec"), env)
         env["execute_local_web_task"]("task", THREAD, "additional guidance", [], requested_model="test-b")
         self.assertEqual(self.rpc.calls[-1][0], "turn/steer")

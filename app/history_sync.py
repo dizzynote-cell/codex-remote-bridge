@@ -4,6 +4,7 @@ import hashlib
 import subprocess
 import time
 import threading
+from thread_payload import for_web
 
 TERMINAL = {'completed', 'failed', 'interrupted', 'cancelled'}
 
@@ -109,7 +110,7 @@ def run(api):
                     thread['updatedAt'] = summaries.get(tid,{}).get('updatedAt') or thread.get('recencyAt') or thread.get('updatedAt')
                     if request:
                         thread['bridgeRequestId'] = request['requestId']
-                    snapshot = api['enrich_thread_attachments'](thread,True)
+                    snapshot = for_web(api['enrich_thread_attachments'](thread,True))
                     digest = hashlib.sha256(json.dumps(snapshot,ensure_ascii=False,sort_keys=True).encode()).hexdigest()
                     if request or digests.get(tid)!=digest:
                         payload['threads'] = [snapshot]

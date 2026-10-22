@@ -13,10 +13,24 @@ $files = @(
     'codex-windows-sandbox-setup.exe',
     'rg.exe'
 )
-foreach ($name in $files) {
-    $source = Join-Path $sourceDir $name
-    if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw "Missing Codex runtime component: $name" }
-    $destinationName = if ($name -eq 'codex.exe') { 'codex-app-server.exe' } else { $name }
-    Copy-Item -LiteralPath $source -Destination (Join-Path $targetDir $destinationName) -Force
+$stageDir = Join-Path $targetDir ('.runtime-stage-' + [Guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $stageDir | Out-Null
+try {
+    # A locked source must fail before changing any of the existing components.
+    foreach ($name in $files) {
+        $source = Join-Path $sourceDir $name
+        if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw "Missing Codex runtime component: $name" }
+        $destinationName = if ($name -eq 'codex.exe') { 'codex-app-server.exe' } else { $name }
+        Copy-Item -LiteralPath $source -Destination (Join-Path $stageDir $destinationName) -Force
+    }
+    foreach ($name in $files) {
+        $destinationName = if ($name -eq 'codex.exe') { 'codex-app-server.exe' } else { $name }
+        Copy-Item -LiteralPath (Join-Path $stageDir $destinationName) -Destination (Join-Path $targetDir $destinationName) -Force
+    }
+    Set-Content -LiteralPath (Join-Path $targetDir 'runtime-version.txt') -Value $package.Name -Encoding ascii
+} finally {
+    $resolvedStage = [IO.Path]::GetFullPath($stageDir)
+    $resolvedTarget = [IO.Path]::GetFullPath($targetDir).TrimEnd('\') + '\'
+    if (-not $resolvedStage.StartsWith($resolvedTarget,[StringComparison]::OrdinalIgnoreCase)) { throw 'Invalid runtime staging path.' }
+    Remove-Item -LiteralPath $resolvedStage -Recurse -Force -ErrorAction SilentlyContinue
 }
-Set-Content -LiteralPath (Join-Path $targetDir 'runtime-version.txt') -Value $package.Name -Encoding ascii

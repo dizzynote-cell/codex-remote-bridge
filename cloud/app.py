@@ -257,9 +257,11 @@ class H(BaseHTTPRequestHandler):
             rows=db.execute('SELECT id,kind,payload,created_at FROM task_events WHERE task_id=? AND id>? ORDER BY id',(task_id,after)).fetchall()
             return self.json({'events':[{'id':r[0],'kind':r[1],'payload':json.loads(r[2]),'createdAt':r[3]} for r in rows]})
         if p.path=='/api/threads':
+            desktop_row=db.execute("SELECT value FROM meta WHERE key='desktop_project_state'").fetchone()
+            desktop=json.loads(desktop_row[0]) if desktop_row else {}
             rows=db.execute('SELECT t.id,COALESCE(o.name,t.name),t.cwd,t.status,t.preview,t.updated_at,t.synced_at,COALESCE(o.pinned,0),o.project FROM threads t LEFT JOIN thread_organizer o ON o.thread_id=t.id WHERE t.id NOT IN (SELECT thread_id FROM hidden_threads) ORDER BY CAST(t.updated_at AS REAL) DESC').fetchall()
             projects_row=db.execute("SELECT value FROM meta WHERE key='codex_projects'").fetchone();projects=json.loads(projects_row[0]) if projects_row else []
-            return self.json({'threads':[{'id':r[0],'name':r[1],'cwd':r[2],'status':r[3],'preview':r[4],'updatedAt':r[5],'syncedAt':r[6],'pinned':bool(r[7]),'projectOverride':r[8]} for r in rows],'projects':projects,'nextCursor':None})
+            return self.json({'threads':[{'id':r[0],'name':r[1],'cwd':r[2],'status':r[3],'preview':r[4],'updatedAt':r[5],'syncedAt':r[6],'pinned':bool(r[7]),'projectOverride':r[8],'desktopProject':desktop.get('assignments',{}).get(r[0])} for r in rows],'projects':desktop.get('projects',projects),'nextCursor':None})
         if p.path=='/api/thread-organizer':return self.json(thread_organizer.snapshot(db))
         if p.path=='/api/threads/hidden':
             rows=db.execute('SELECT t.id,t.name,t.cwd,h.hidden_at FROM hidden_threads h LEFT JOIN threads t ON t.id=h.thread_id ORDER BY h.hidden_at DESC').fetchall()
@@ -269,6 +271,10 @@ class H(BaseHTTPRequestHandler):
             try:
                 with HISTORY_LOCK:
                     result=history_store.read(db,unquote(p.path.split('/api/thread/',1)[1]),(query.get('turnLimit') or ['6'])[0],(query.get('refresh') or ['0'])[0]=='1')
+                    if result:
+                        desktop_row=db.execute("SELECT value FROM meta WHERE key='desktop_project_state'").fetchone()
+                        desktop=json.loads(desktop_row[0]) if desktop_row else {}
+                        result['thread']['desktopProject']=desktop.get('assignments',{}).get(result['thread']['id'])
                 return self.json(result or {'error':'对话尚未同步'},200 if result else 404)
             except ValueError:return self.json({'error':'invalid_turn_limit'},400)
         if p.path=='/api/status':
@@ -290,10 +296,24 @@ class H(BaseHTTPRequestHandler):
         if not f.is_file() or WEB.resolve() not in f.parents:return self.send_error(404)
         b=f.read_bytes(); ct={'.html':'text/html','.js':'application/javascript','.css':'text/css'}.get(f.suffix,'application/octet-stream'); self.send_response(200); self.send_header('Content-Type',ct+'; charset=utf-8'); self.send_header('Cache-Control','no-cache, no-store, must-revalidate'); self.send_header('Pragma','no-cache'); self.send_header('Expires','0'); self.send_header('Content-Length',str(len(b))); self.end_headers(); self.wfile.write(b)
     def do_POST(self):
+        try:n=int(self.headers.get('Content-Length') or 0)
+        except ValueError:return self.json({'error':'invalid_content_length'},400)
+        if not 0<=n<=24*1024*1024:
+            self.close_connection=True
+            return self.json({'error':'request_too_large'},413)
+        # A slow upload must not hold the lock used by history reads/heartbeats.
+        self.connection.settimeout(20)
+        try:body=self.rfile.read(n)
+        except (TimeoutError,ConnectionError):
+            self.close_connection=True
+            return
+        if len(body)!=n:
+            self.close_connection=True
+            return
         with DB_LOCK:
-            return self._do_POST()
-    def _do_POST(self):
-        p=urlparse(self.path); n=min(int(self.headers.get('Content-Length') or 0),24*1024*1024); body=self.rfile.read(n)
+            return self._do_POST(body)
+    def _do_POST(self,body):
+        p=urlparse(self.path)
         if p.path=='/api/device/interactions':
             if not secrets.compare_digest(self.headers.get('Authorization') or '',f'Bearer {SYNC_TOKEN}'):return self.json({'error':'unauthorized'},401)
             try:return self.json(interactions.exchange(db,json.loads(body or b'{}')))
@@ -332,6 +352,9 @@ class H(BaseHTTPRequestHandler):
                 db.execute("INSERT INTO meta VALUES('voice_config',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(json.dumps(safe),))
             visibility=sync_visibility(data.get('threadVisibility') or {})
             organizer=thread_organizer.merge(db,data.get('threadOrganizer') or {})
+            desktop=data.get('desktopProjectState')
+            if isinstance(desktop,dict) and isinstance(desktop.get('projects'),list) and isinstance(desktop.get('assignments'),dict):
+                db.execute("INSERT INTO meta VALUES('desktop_project_state',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(json.dumps(desktop,ensure_ascii=False),))
             projects=data.get('projects') or []
             if isinstance(projects,list):
                 projects=[{'id':str(item.get('id') or '')[:100],'name':str(item.get('name') or '')[:100],'cwd':str(item.get('cwd') or '')[:500]} for item in projects if isinstance(item,dict) and item.get('cwd')][:100]
@@ -414,7 +437,9 @@ class H(BaseHTTPRequestHandler):
         if p.path=='/api/sync':
             if not secrets.compare_digest(self.headers.get('Authorization') or '',f'Bearer {SYNC_TOKEN}'):return self.json({'error':'unauthorized'},401)
             with HISTORY_LOCK:
-                result=history_store.ingest(db,json.loads(body))
+                try:data=json.loads(body)
+                except ValueError:return self.json({'error':'invalid_sync_payload'},400)
+                result=history_store.ingest(db,data)
             return self.json(result)
         if p.path=='/api/device/status':
             if not secrets.compare_digest(self.headers.get('Authorization') or '',f'Bearer {SYNC_TOKEN}'):return self.json({'error':'unauthorized'},401)

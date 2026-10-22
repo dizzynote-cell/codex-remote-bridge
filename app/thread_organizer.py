@@ -4,8 +4,30 @@
 # Repository: https://github.com/dizzynote-cell/codex-remote-bridge
 
 """Persistent webpage organization keyed by stable Codex thread UUIDs."""
-import json, os, threading, time
+import json, ntpath, os, threading, time
 from pathlib import Path
+
+
+def continuation_project(source_thread_id, cwd, projects, organizer):
+    """Keep a continuation in the source thread's web project grouping."""
+    if not source_thread_id:
+        return None
+    override = organizer.get(source_thread_id).get("project")
+    if override:
+        return override
+    target = ntpath.normcase(ntpath.normpath(str(cwd)))
+    matches = []
+    for project in projects:
+        root = str(project.get("cwd") or "")
+        if not root:
+            continue
+        normalized = ntpath.normcase(ntpath.normpath(root))
+        try:
+            if ntpath.commonpath((target, normalized)) == normalized:
+                matches.append(root)
+        except ValueError:
+            continue
+    return max(matches, key=len) if matches else None
 
 class Organizer:
     def __init__(self, path: Path): self.path=path; self.lock=threading.RLock()

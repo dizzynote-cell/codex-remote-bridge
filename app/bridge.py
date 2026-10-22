@@ -3,6 +3,8 @@
 # Project: Codex Remote Bridge
 # Repository: https://github.com/dizzynote-cell/codex-remote-bridge
 
+import faulthandler
+faulthandler.dump_traceback_later(20)
 import json
 import base64
 import mimetypes
@@ -32,8 +34,11 @@ from urllib3.util.retry import Retry
 from lark_oapi.api.im.v1 import *
 from codex_rpc import CodexRpc
 import voice_tts
-from thread_organizer import Organizer
+from thread_organizer import Organizer, continuation_project
 from thread_visibility import Visibility
+from compaction_count import counter as compaction_counter
+from desktop_projects import DesktopProjects
+from turn_routing import reconcile as reconcile_turns, steer_or_idle, release_owned
 
 ENV_FILE = ROOT / "config" / ".env"
 DATA_DIR = ROOT / "data"
@@ -46,6 +51,7 @@ VOICE_DIR = DATA_DIR / "voice-cache"
 PREFERENCES_FILE = DATA_DIR / "web-preferences.json"
 ORGANIZER_FILE = DATA_DIR / "thread-organizer.json"
 CODEX_GLOBAL_STATE_FILE = Path.home() / ".codex" / ".codex-global-state.json"
+desktop_projects = DesktopProjects(CODEX_GLOBAL_STATE_FILE)
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -76,15 +82,7 @@ def is_valid_thread_id(value: str) -> bool:
 
 def codex_sidebar_projects() -> list[dict]:
     """Return the local projects shown in the current Codex sidebar order."""
-    try:
-        data = json.loads(CODEX_GLOBAL_STATE_FILE.read_text(encoding="utf-8"))
-        projects = data.get("local-projects") or {}; order = data.get("project-order") or []; result = []
-        for project_id in order:
-            project = projects.get(project_id) or {}; roots = project.get("rootPaths") or []
-            if roots and isinstance(roots[0], str):
-                result.append({"id": project_id, "name": str(project.get("name") or Path(roots[0]).name), "cwd": roots[0]})
-        return result
-    except (OSError, ValueError, TypeError): return []
+    return desktop_projects.snapshot()['projects']
 
 
 def load_state() -> dict:
@@ -104,7 +102,7 @@ codex_rpc = CodexRpc()
 from model_choices import ModelChoices
 model_choices = ModelChoices(DATA_DIR, lambda: codex_rpc, codex_lock)
 thread_organizer = Organizer(ORGANIZER_FILE)
-thread_visibility = Visibility(DATA_DIR / "thread-visibility.json")
+thread_visibility = Visibility(DATA_DIR / 'thread-visibility.json')
 active_turns: dict[str, str] = {}
 thread_message_locks: dict[str, threading.Lock] = {}
 thread_message_locks_guard = threading.Lock()
@@ -531,7 +529,13 @@ def read_thread(thread_id: str) -> dict:
             "threadId": thread_id,
             "includeTurns": True,
         })
-    return model_choices.enrich(result.get("thread", {}))
+        reconcile_turns(active_turns, result.get('thread', {}))
+    thread = model_choices.enrich(result.get("thread", {}))
+    pending = codex_rpc.interactions.snapshot().get('requests') or []
+    waiting = any(r.get('threadId') == thread_id and r.get('status') == 'pending' for r in pending)
+    thread['bridgeHealth'] = codex_rpc.health.snapshot(thread, waiting=waiting)
+    thread['bridgeCompactionCount'] = compaction_counter.count(thread.get('path'))
+    return desktop_projects.enrich(thread)
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
@@ -589,11 +593,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if parsed.path.startswith("/api/") and not self.require_auth():
                 return
             if parsed.path == "/api/interactions":
-                self.send_json({**codex_rpc.interactions.snapshot(), "available": not codex_rpc._closed}); return
+                self.send_json({**codex_rpc.interactions.snapshot(), "available": not codex_rpc._closed})
+                return
             if parsed.path == "/api/models":
                 self.send_json(model_choices.snapshot())
                 return
             if parsed.path == "/api/threads":
+                project_state = desktop_projects.snapshot()
                 query = parse_qs(parsed.query)
                 limit = min(max(int(query.get("limit", [50])[0]), 1), 100)
                 cursor = query.get("cursor", [None])[0]
@@ -606,15 +612,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     "cwd": item.get("cwd"),
                     "pinned": bool(thread_organizer.get(item.get("id")).get("pinned")),
                     "projectOverride": thread_organizer.get(item.get("id")).get("project"),
+                    "desktopProject": project_state['assignments'].get(item.get('id')),
                     "status": item.get("status"),
                     "preview": item.get("preview"),
                     "updatedAt": item.get("updatedAt"),
-                } for item in threads], "projects": codex_sidebar_projects(), "nextCursor": result.get("nextCursor")})
+                } for item in threads], "projects": project_state['projects'], "nextCursor": result.get("nextCursor")})
                 return
             if parsed.path == "/api/threads/hidden":
-                self.send_json({"threads": [{"id": key, "name": value.get("name") or "未命名对话"}
-                    for key, value in thread_visibility.snapshot().items() if value["hidden"]]})
-                return
+                self.send_json({"threads": [{"id": key, "name": value.get("name") or "未命名对话"} for key, value in thread_visibility.snapshot().items() if value["hidden"]]}); return
             if parsed.path == "/api/thread-organizer":
                 self.send_json(thread_organizer.snapshot())
                 return
@@ -719,29 +724,30 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if parsed.path in {"/api/threads/hide", "/api/threads/unhide"}:
                 if not self.require_auth(): return
                 origin = self.headers.get("Origin")
+                if origin and urlparse(origin).netloc != self.headers.get("Host"): self.send_json({"error":"origin_mismatch"},403); return
+                if not self.headers.get("Content-Type","").startswith("application/json"): self.send_json({"error":"json_required"},415); return
+                size = int(self.headers.get("Content-Length") or 0)
+                if not 0 < size <= 4096: self.send_json({"error":"invalid_payload"},400); return
+                payload = json.loads(self.rfile.read(size))
+                if not isinstance(payload,dict) or not is_valid_thread_id(payload.get("threadId")): self.send_json({"error":"invalid_thread_id"},400); return
+                thread_visibility.set(payload["threadId"], parsed.path.endswith("/hide"), payload.get("name",""))
+                self.send_json({"ok":True}); return
+            if parsed.path == "/api/interactions/respond":
+                if not self.require_auth(): return
+                origin = self.headers.get("Origin")
                 if origin and urlparse(origin).netloc != self.headers.get("Host"):
                     self.send_json({"error": "origin_mismatch"}, 403); return
                 if not self.headers.get("Content-Type", "").startswith("application/json"):
                     self.send_json({"error": "json_required"}, 415); return
                 size = int(self.headers.get("Content-Length") or 0)
-                if not 0 < size <= 4096: self.send_json({"error": "invalid_payload"}, 400); return
-                payload = json.loads(self.rfile.read(size))
-                if not isinstance(payload, dict) or not is_valid_thread_id(payload.get("threadId")):
-                    self.send_json({"error": "invalid_thread_id"}, 400); return
-                thread_visibility.set(payload["threadId"], parsed.path.endswith("/hide"), payload.get("name", ""))
-                self.send_json({"ok": True}); return
-            if parsed.path == "/api/interactions/respond":
-                if not self.require_auth(): return
-                origin = self.headers.get("Origin")
-                if origin and urlparse(origin).netloc != self.headers.get("Host"): self.send_json({"error": "origin_mismatch"}, 403); return
-                if not self.headers.get("Content-Type", "").startswith("application/json"): self.send_json({"error": "json_required"}, 415); return
-                size = int(self.headers.get("Content-Length") or 0)
-                if not 0 < size <= 64000: self.send_json({"error": "回答内容过大或为空"}, 400); return
+                if not 0 < size <= 64000:
+                    self.send_json({"error": "回答内容过大或为空"}, 400); return
                 try:
                     payload = json.loads(self.rfile.read(size))
                     if not isinstance(payload, dict): raise ValueError("回答格式错误")
                     self.send_json(codex_rpc.interactions.respond(payload))
-                except (ValueError, RuntimeError) as error: self.send_json({"error": str(error)}, 409)
+                except (ValueError, RuntimeError) as error:
+                    self.send_json({"error": str(error)}, 409)
                 return
             if parsed.path == "/api/thread-organizer":
                 if not self.require_auth(): return
@@ -882,6 +888,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     if not text or not str(payload.get("cwd") or "").strip() or not str(payload.get("title") or "").strip():
                         self.send_json({"error": "missing_new_thread_fields"}, 400)
                         return
+                    source_thread_id = str(payload.get("sourceThreadId") or "").strip()
+                    if source_thread_id and not is_valid_thread_id(source_thread_id):
+                        self.send_json({"error": "invalid_source_thread_id"}, 400)
+                        return
                 elif not thread_id or not text:
                     self.send_json({"error": "missing_thread_or_text"}, 400)
                     return
@@ -900,7 +910,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     local_web_tasks[task_id] = {"id": task_id, "status": "queued", "message": "已提交到本机桥"}
                 threading.Thread(target=execute_local_web_task,
                                  args=(task_id, thread_id, text, payload.get("files") or [], operation,
-                                       str(payload.get("cwd") or ""), str(payload.get("title") or ""), requested_model, payload.get("effort"), bool(payload.get("followDefaults")), payload.get("serviceTier")), daemon=True).start()
+                                       str(payload.get("cwd") or ""), str(payload.get("title") or ""), requested_model, payload.get("effort"), bool(payload.get("followDefaults")),
+                                       str(payload.get("sourceThreadId") or "").strip(), payload.get("serviceTier")), daemon=True).start()
                 self.send_json({"taskId": task_id})
                 return
             self.send_error(404)
@@ -919,14 +930,17 @@ def set_local_web_task(task_id: str, **values) -> None:
 
 
 def execute_local_web_task(task_id: str, thread_id: str, text: str, files: list,
-                           operation: str = "message", cwd_value: str = "", title: str = "", requested_model=None, requested_effort=None, follow_defaults=False, requested_service_tier=None) -> None:
+                           operation: str = "message", cwd_value: str = "", title: str = "", requested_model=None, requested_effort=None, follow_defaults=False,
+                           source_thread_id: str = "", requested_service_tier=None) -> None:
     """Run a localhost UI request without requiring the cloud relay."""
+    turn_id = None
     try:
         if operation == "new_thread":
             cwd = Path(cwd_value.strip())
             if not cwd.is_absolute():
                 raise RuntimeError("项目目录必须是本机绝对路径")
             cwd.mkdir(parents=True, exist_ok=True)
+            project = continuation_project(source_thread_id, cwd, codex_sidebar_projects(), thread_organizer)
             set_local_web_task(task_id, status="running", message="正在创建新对话")
             with codex_lock:
                 result = codex_rpc.call("thread/start", {"cwd": str(cwd), "sandbox": "danger-full-access",
@@ -935,8 +949,10 @@ def execute_local_web_task(task_id: str, thread_id: str, text: str, files: list,
                 if not thread_id:
                     raise RuntimeError("Codex 没有返回新对话 ID")
                 codex_rpc.call("thread/name/set", {"threadId": thread_id, "name": title.strip()})
+                if project:
+                    thread_organizer.update(thread_id, name=title.strip(), project=project)
             set_local_web_task(task_id, status="running", message="新对话已创建，正在发送第一条消息",
-                               threadId=thread_id, title=title.strip(), cwd=str(cwd))
+                               threadId=thread_id, title=title.strip(), cwd=str(cwd), project=project)
         if not is_valid_thread_id(thread_id):
             raise RuntimeError("所选条目不是有效的 Codex 对话，请刷新列表后重新选择")
         if requested_model and operation == "new_thread" and not follow_defaults:
@@ -961,25 +977,11 @@ def execute_local_web_task(task_id: str, thread_id: str, text: str, files: list,
                 codex_input.append({"type": "localImage", "path": str(path)})
         set_local_web_task(task_id, status="running", message="Codex 正在处理")
         with codex_lock:
-            active_turn_id = active_turns.get(thread_id)
-            if not active_turn_id:
-                snapshot = read_thread(thread_id)
-                for candidate in reversed(snapshot.get("turns", [])):
-                    status = candidate.get("status")
-                    status_name = status.get("type") if isinstance(status, dict) else status
-                    if status_name not in {"completed", "failed", "interrupted", "cancelled"}:
-                        active_turn_id = candidate.get("id")
-                        break
+            active_turn_id = steer_or_idle(thread_id, codex_input, read_thread, codex_rpc.call)
             if active_turn_id:
-                try:
-                    codex_rpc.call("turn/steer", {"threadId": thread_id, "expectedTurnId": active_turn_id,
-                                                   "input": codex_input})
-                    set_local_web_task(task_id, status="completed", message="已作为补充引导追加",
-                                       turnId=active_turn_id, steered=True)
-                    return
-                except RuntimeError:
-                    if active_turns.get(thread_id) == active_turn_id:
-                        active_turns.pop(thread_id, None)
+                set_local_web_task(task_id, status="completed", message="已作为补充引导追加",
+                                   turnId=active_turn_id, steered=True)
+                return
             before = read_thread(thread_id)
             previous_turn_ids = {turn.get("id") for turn in before.get("turns", [])}
             codex_rpc.call("thread/resume", {"threadId": thread_id, "sandbox": "danger-full-access",
@@ -1025,10 +1027,13 @@ def execute_local_web_task(task_id: str, thread_id: str, text: str, files: list,
                                    message=terminal_message(target),
                                    turnId=turn_id)
                 return
-        raise RuntimeError("Codex 执行超过30分钟")
+        raise RuntimeError("桥等待已超过30分钟，Codex 可能仍在运行；请查看会话状态后再决定是否继续")
     except Exception as error:
         log(f"本地网页任务失败 {task_id}: {error}")
         set_local_web_task(task_id, status="failed", message=str(error))
+    finally:
+        with codex_lock:
+            release_owned(active_turns, thread_id, turn_id)
 
 
 def start_dashboard():
@@ -1069,11 +1074,12 @@ def cloud_heartbeat_worker() -> None:
             detected_recently = bool(cloud_runtime_state.get("detected_working")) and time.time() - float(cloud_runtime_state.get("detected_at") or 0) < 120
             active_thread_ids = list(dict.fromkeys(list(active_turns) +
                 (list(cloud_runtime_state.get("detected_thread_ids") or []) if detected_recently else [])))
+            project_state = desktop_projects.snapshot()
             response = requests.post(f"{base}/api/device/heartbeat",
                 headers={"Authorization": f"Bearer {token}"},
                 json={"modelSettings": model_choices.snapshot(False), "preferences":web_preferences(),
-                      "threadVisibility":thread_visibility.snapshot(),
-                      "threadOrganizer":thread_organizer.snapshot(), "projects":codex_sidebar_projects(),
+                      "threadVisibility":thread_visibility.snapshot(), "threadOrganizer":thread_organizer.snapshot(), "projects":project_state['projects'],
+                      "desktopProjectState":project_state,
                       "voiceConfig":{**{key:voice_tts.settings(ROOT)[key] for key in ("voice","resource")},
                                      "configured":bool(all(voice_tts.settings(ROOT).values()))},
                       "working": bool(active_thread_ids) or bool(active_turns) or detected_recently,
@@ -1110,24 +1116,29 @@ def cloud_task_report(task_id: str, kind: str, payload: dict, status: str | None
 
 def cloud_interactions_worker() -> None:
     """A separate lane: a blocked task must not block the answer that releases it."""
-    base = cloud_base_url(); token = (os.getenv("CODEX_HISTORY_SYNC_TOKEN") or "").strip()
+    base = cloud_base_url()
+    token = (os.getenv("CODEX_HISTORY_SYNC_TOKEN") or "").strip()
     if not base or not token: return
     acks = []
     while True:
         delay = 2
         try:
-            response = requests.post(f"{base}/api/device/interactions", headers={"Authorization": f"Bearer {token}"},
+            response = requests.post(f"{base}/api/device/interactions",
+                headers={"Authorization": f"Bearer {token}"},
                 json={"snapshot": codex_rpc.interactions.snapshot(), "acks": acks}, timeout=(5, 10))
-            if response.status_code == 404: delay = 30
+            if response.status_code == 404:
+                # A newer local bridge may precede deployment of the cloud endpoint.
+                delay = 30
             else:
-                response.raise_for_status(); acks = []
+                response.raise_for_status()
+                acks = []
                 for answer in response.json().get("answers") or []:
                     ack = {"session": answer.get("session"), "id": answer.get("id")}
                     try: codex_rpc.interactions.respond(answer)
                     except (ValueError, RuntimeError): ack["error"] = "回答未被接受：请求可能已结束，或答案格式不符。请刷新后重试。"
                     acks.append(ack)
         except Exception:
-            # Never log answer bodies, verification details, or authorization URLs.
+            # Do not log answer bodies, verification details or authorization URLs.
             delay = 5
         time.sleep(delay)
 
@@ -1162,6 +1173,7 @@ def download_cloud_task_files(task: dict) -> list[Path]:
 
 def execute_cloud_task(task: dict) -> None:
     task_id = task["id"]
+    thread_id, turn_id = task.get("threadId"), None
     try:
         operation = task.get("op") or "message"
         if operation == "voice":
@@ -1243,18 +1255,8 @@ def execute_cloud_task(task: dict) -> None:
         cloud_task_report(task_id, "status", {"message": "本机桥已接收任务"}, "running")
 
         with codex_lock:
-            active_turn_id = active_turns.get(thread_id)
-            if not active_turn_id:
-                snapshot = read_thread(thread_id)
-                for candidate in reversed(snapshot.get("turns", [])):
-                    status = candidate.get("status")
-                    status_name = status.get("type") if isinstance(status, dict) else status
-                    if status_name not in {"completed", "failed", "interrupted", "cancelled"}:
-                        active_turn_id = candidate.get("id")
-                        break
+            active_turn_id = steer_or_idle(thread_id, codex_input, read_thread, codex_rpc.call)
             if active_turn_id:
-                codex_rpc.call("turn/steer", {"threadId": thread_id, "expectedTurnId": active_turn_id,
-                                               "input": codex_input})
                 cloud_task_report(task_id, "steered", {"message": "已作为补充引导追加到当前任务",
                                   "turnId": active_turn_id}, "completed", result="steered")
                 return
@@ -1305,13 +1307,16 @@ def execute_cloud_task(task: dict) -> None:
                                   "codexStatus": status_name,"message":terminal_message(target)}, final_status, result=answer,
                                   error=None if final_status == "completed" else status_name)
                 return
-        raise RuntimeError("Codex 执行超过30分钟")
+        raise RuntimeError("桥等待已超过30分钟，Codex 可能仍在运行；请查看会话状态后再决定是否继续")
     except Exception as error:
         log(f"网页任务处理失败 {task_id}: {error}")
         try:
             cloud_task_report(task_id, "error", {"message": str(error)}, "failed", error=str(error))
         except Exception as report_error:
             log(f"网页任务错误状态回传失败 {task_id}: {report_error}")
+    finally:
+        with codex_lock:
+            release_owned(active_turns, thread_id, turn_id)
 
 
 def cloud_task_worker() -> None:
@@ -1594,111 +1599,95 @@ def send_to_codex(message_id: str, chat_id: str, text: str, codex_input: list | 
         reply_text(message_id, "当前是电脑模式：Codex 客户端正在运行并拥有优先权。桥没有发送这条指令。完全退出 Codex 客户端后，桥会自动切换到手机模式。")
         return
 
-    # Recover active state from Codex itself after a bridge restart or an RPC hiccup.
-    codex_input = codex_input or [{"type": "text", "text": text, "text_elements": []}]
-    with codex_lock:
-        active_turn_id = active_turns.get(thread_id)
-        if not active_turn_id:
-            snapshot = read_thread(thread_id)
-            for candidate in reversed(snapshot.get("turns", [])):
-                status = candidate.get("status")
-                status_name = status.get("type") if isinstance(status, dict) else status
-                if status_name not in {"completed", "failed", "interrupted", "cancelled"}:
-                    active_turn_id = candidate.get("id")
-                    if active_turn_id:
-                        active_turns[thread_id] = active_turn_id
-                    break
-        if active_turn_id:
-            try:
-                codex_rpc.call("turn/steer", {
-                    "threadId": thread_id,
-                    "expectedTurnId": active_turn_id,
-                    "input": codex_input,
-                })
+    turn_id = None
+    try:
+        # Recover active state from Codex itself after a bridge restart or an RPC hiccup.
+        codex_input = codex_input or [{"type": "text", "text": text, "text_elements": []}]
+        with codex_lock:
+            active_turn_id = steer_or_idle(thread_id, codex_input, read_thread, codex_rpc.call)
+            if active_turn_id:
                 log(f"已向运行中回合追加引导 thread={thread_id} turn={active_turn_id}")
                 reply_text(message_id, "已追加到当前正在运行的任务。Codex 会结合这条补充继续处理。")
                 return
+
+            before = read_thread(thread_id)
+            previous_turn_ids = {turn.get("id") for turn in before.get("turns", [])}
+            try:
+                resumed = codex_rpc.call("thread/resume", {
+                    "threadId": thread_id,
+                    "sandbox": "danger-full-access",
+                    "approvalPolicy": "never",
+                })
             except RuntimeError as error:
-                # The turn may have completed between message receipt and steering.
-                log(f"追加引导时原回合已不可用，将自动启动新回合：{error}")
-                if active_turns.get(thread_id) == active_turn_id:
-                    active_turns.pop(thread_id, None)
+                if "already has an active writer" in str(error):
+                    raise RuntimeError(
+                        "这个对话目前正在 Codex 桌面端占用。请先在电脑端切换到其他对话，稍等片刻后重试；"
+                        "或者在飞书绑定一个当前未打开的对话。"
+                    ) from error
+                raise
+            result = model_choices.start(thread_id, codex_input, fallback=resumed.get("model"))
+            turn = result.get("turn", {})
+            turn_id = turn.get("id")
+            if turn_id:
+                active_turns[thread_id] = turn_id
+        reply_text(message_id, f"已发送到 Codex：{before.get('name') or '当前对话'}\n本轮请求模型：{result['bridgeModel']['requested']} · {result['bridgeModel']['effort']}")
 
-        before = read_thread(thread_id)
-        previous_turn_ids = {turn.get("id") for turn in before.get("turns", [])}
-        try:
-            resumed = codex_rpc.call("thread/resume", {
-                "threadId": thread_id,
-                "sandbox": "danger-full-access",
-                "approvalPolicy": "never",
-            })
-        except RuntimeError as error:
-            if "already has an active writer" in str(error):
-                raise RuntimeError(
-                    "这个对话目前正在 Codex 桌面端占用。请先在电脑端切换到其他对话，稍等片刻后重试；"
-                    "或者在飞书绑定一个当前未打开的对话。"
-                ) from error
-            raise
-        result = model_choices.start(thread_id, codex_input, fallback=resumed.get("model"))
-        turn = result.get("turn", {})
-        turn_id = turn.get("id")
-        if turn_id:
-            active_turns[thread_id] = turn_id
-    reply_text(message_id, f"已发送到 Codex：{before.get('name') or '当前对话'}\n本轮请求模型：{result['bridgeModel']['requested']} · {result['bridgeModel']['effort']}")
-
-    deadline = time.monotonic() + 1800
-    progress_sent = False
-    while time.monotonic() < deadline:
-        time.sleep(3)
-        thread = read_thread(thread_id)
-        turns = thread.get("turns", [])
-        target = next((item for item in reversed(turns) if item.get("id") == turn_id), None)
-        if target is None:
-            target = next((item for item in reversed(turns) if item.get("id") not in previous_turn_ids), None)
-        if not target:
-            continue
-        status = target.get("status")
-        if not progress_sent and status not in {"completed", "failed", "interrupted"}:
-            progress = turn_live_summary(target)
-            if progress:
-                reply_text(message_id, f"Codex 执行计划：\n\n{progress[:5000]}")
-                progress_sent = True
-                log(f"已回传首条执行计划 thread={thread_id} turn={turn_id}")
-        if status in {"completed", "failed", "interrupted"}:
-            with codex_lock:
-                if active_turns.get(thread_id) == turn_id:
-                    active_turns.pop(thread_id, None)
-            _, agent_text = turn_pair(target)
-            if not agent_text:
-                agent_text = f"任务状态：{status}，没有取得文字回复。"
-            reply_text(message_id, f"Codex 回复：\n\n{agent_text[:12000]}")
-            plan = attachment_plan(target, False)
-            agent_items = [item for item in plan if item["delivery"] == "agent_disk"]
-            local_only_items = [item for item in plan if item["delivery"] == "local_only"]
-            local_fallback_items = [item for item in plan if item["delivery"] == "local_fallback"]
-            if agent_items:
-                lines = [f"{item['name']}\nAgent Disk：{item.get('agentDiskPath') or '未配置'}\n原因：{item['reason']}" for item in agent_items]
-                reply_text(message_id, "本次回复附件统一保存到 Agent Disk：\n\n" + "\n\n".join(lines))
-            else:
-                for item in (item for item in plan if item["delivery"] == "local"):
-                    attachment = Path(item["localPath"])
-                    try:
-                        msg_type, content = upload_feishu_attachment(attachment)
-                        reply_message(message_id, msg_type, content)
-                    except Exception as attachment_error:
-                        log(f"附件回传失败 {attachment}: {attachment_error}")
-                        reply_text(message_id, f"附件 {attachment.name} 未能发送到飞书：{attachment_error}\n本机位置：{attachment}")
-            if local_only_items:
-                reply_text(message_id, "以下文件类型不直接上传，已保存在本机：\n" + "\n".join(
-                    f"{item['name']}：{item['localPath']}" for item in local_only_items))
-            if local_fallback_items:
-                reply_text(message_id, "附件超过直传限制，但尚未配置 Agent Disk；文件仍保存在本机：\n" + "\n".join(
-                    f"{item['name']}：{item['localPath']}" for item in local_fallback_items))
-            return
-    with codex_lock:
-        if active_turns.get(thread_id) == turn_id:
-            active_turns.pop(thread_id, None)
-    reply_text(message_id, "Codex 仍在运行，已超过桥的等待时间。可发送 /当前 查看状态。")
+        deadline = time.monotonic() + 1800
+        progress_sent = False
+        while time.monotonic() < deadline:
+            time.sleep(3)
+            thread = read_thread(thread_id)
+            turns = thread.get("turns", [])
+            target = next((item for item in reversed(turns) if item.get("id") == turn_id), None)
+            if target is None:
+                target = next((item for item in reversed(turns) if item.get("id") not in previous_turn_ids), None)
+            if not target:
+                continue
+            status = target.get("status")
+            if not progress_sent and status not in {"completed", "failed", "interrupted"}:
+                progress = turn_live_summary(target)
+                if progress:
+                    reply_text(message_id, f"Codex 执行计划：\n\n{progress[:5000]}")
+                    progress_sent = True
+                    log(f"已回传首条执行计划 thread={thread_id} turn={turn_id}")
+            if status in {"completed", "failed", "interrupted"}:
+                with codex_lock:
+                    if active_turns.get(thread_id) == turn_id:
+                        active_turns.pop(thread_id, None)
+                _, agent_text = turn_pair(target)
+                if not agent_text:
+                    agent_text = f"任务状态：{status}，没有取得文字回复。"
+                reply_text(message_id, f"Codex 回复：\n\n{agent_text[:12000]}")
+                plan = attachment_plan(target, False)
+                agent_items = [item for item in plan if item["delivery"] == "agent_disk"]
+                local_only_items = [item for item in plan if item["delivery"] == "local_only"]
+                local_fallback_items = [item for item in plan if item["delivery"] == "local_fallback"]
+                if agent_items:
+                    lines = [f"{item['name']}\nAgent Disk：{item.get('agentDiskPath') or '未配置'}\n原因：{item['reason']}" for item in agent_items]
+                    reply_text(message_id, "本次回复附件统一保存到 Agent Disk：\n\n" + "\n\n".join(lines))
+                else:
+                    for item in (item for item in plan if item["delivery"] == "local"):
+                        attachment = Path(item["localPath"])
+                        try:
+                            msg_type, content = upload_feishu_attachment(attachment)
+                            reply_message(message_id, msg_type, content)
+                        except Exception as attachment_error:
+                            log(f"附件回传失败 {attachment}: {attachment_error}")
+                            reply_text(message_id, f"附件 {attachment.name} 未能发送到飞书：{attachment_error}\n本机位置：{attachment}")
+                if local_only_items:
+                    reply_text(message_id, "以下文件类型不直接上传，已保存在本机：\n" + "\n".join(
+                        f"{item['name']}：{item['localPath']}" for item in local_only_items))
+                if local_fallback_items:
+                    reply_text(message_id, "附件超过直传限制，但尚未配置 Agent Disk；文件仍保存在本机：\n" + "\n".join(
+                        f"{item['name']}：{item['localPath']}" for item in local_fallback_items))
+                return
+        with codex_lock:
+            if active_turns.get(thread_id) == turn_id:
+                active_turns.pop(thread_id, None)
+        reply_text(message_id, "Codex 仍在运行，已超过桥的等待时间。可发送 /当前 查看状态。")
+    finally:
+        with codex_lock:
+            release_owned(active_turns, thread_id, turn_id)
 
 
 def process_message(message_id: str, chat_id: str, chat_type: str, text: str, codex_input: list | None = None) -> None:
@@ -1836,6 +1825,7 @@ def main() -> None:
     threading.Thread(target=cloud_task_worker, daemon=True).start()
     threading.Thread(target=cloud_interactions_worker, daemon=True).start()
     start_dashboard()
+    faulthandler.cancel_dump_traceback_later()
     log("正在连接飞书开放平台……")
     ws_client = lark.ws.Client(
         APP_ID,

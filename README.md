@@ -2,9 +2,13 @@
 
 网页端可选语音朗读：已完成的推理摘要和最终回复可按需调用火山 TTS。语音默认关闭；安装时可选填 API Key、音色 ID 和资源 ID，密钥只保存在主力电脑。已合成的语音点击即可播放，未合成的语音点击后生成。本机语音只按容量清理；公网临时缓存保留最多 72 小时，并设 5 GB 上限。
 
-**v0.2.13-beta 测试版 · 作者：[xiyannan](https://github.com/dizzynote-cell/codex-remote-bridge)**
+**v0.2.16-beta 测试版 · 作者：[xiyannan](https://github.com/dizzynote-cell/codex-remote-bridge)**
 
 [查看版本更新日志](CHANGELOG.md)
+
+本地与公网网页均支持 Markdown 表格、模型与推理强度选择、快速模式、截图粘贴、双窗口额度展示及按对话保留的执行状态。状态区区分正在执行工具、最近操作已完成、等待模型继续，以及连接重试；旧同步内容会明确标注时间，不因切换对话而丢失提示。
+
+公开仓库提供源码和安装引导，不提供共享账号或公共聊天服务。每位使用者需在自己的电脑登录 Codex、配置自己的飞书应用；公网网页是可选项，不包含作者的私人部署、授权信息或会话记录。
 
 项目地址：https://github.com/dizzynote-cell/codex-remote-bridge
 
@@ -74,6 +78,25 @@ D:\BaiduSyncdisk\Agent Disk
 ## 双端维护说明
 
 本地网页与公网网页的核心交互应保持一致，但认证、历史来源、输入路径和文件能力不同。修改双端功能前请查看 [本地网页与公网网页维护边界](docs/frontend-parity.md)。
+
+## 升级与验证
+
+更新源码前先备份自己的配置与数据。网页静态更新通常只需刷新页面；本机 Python 或运行组件更新后，在任务结束时手动重启桥。云端 Python 更新需要单独部署并重启自己的桥服务，不应影响同服务器上的其他项目。
+
+项目分组读取客户端的本地展示元数据，可能随客户端版本变化；网页分类调整不保证修改客户端的项目归属。压缩次数来自可读的会话记录，无法读取时显示未知。连接异常提示用于定位问题，不保证修复代理或上游服务故障，也不自动重发消息。
+
+离线回归测试（不启动真实 Codex 任务）：
+
+```powershell
+python -m unittest discover -s tests -p "test_*.py"
+node tests/test_markdown.cjs
+node tests/test_turn_health_ui.cjs
+node tests/test_cloud_task_scope.cjs
+node tests/test_project_display.cjs
+node tests/test_interactions_ui.cjs
+```
+
+Node.js 仅用于上述网页测试，不是桥运行的必需依赖。
 
 ## 常用飞书命令
 

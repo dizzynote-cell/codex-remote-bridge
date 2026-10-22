@@ -3,6 +3,7 @@ import hashlib
 import json
 import time
 import uuid
+from thread_payload import for_web
 
 
 def initialize(db):
@@ -88,4 +89,4 @@ def read(db, thread_id, requested, force=False):
     t['turns'] = turns[-limit:] if limit else []
     t['bridgeTotalTurns'] = total
     t['bridgeSync'] = {'syncedAt':row[1], 'pending':state[0]!=state[1], 'error':state[2], 'requested':requested}
-    return {'thread':t}
+    return {'thread':for_web(t)}

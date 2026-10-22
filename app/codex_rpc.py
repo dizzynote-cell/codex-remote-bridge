@@ -9,6 +9,7 @@ import threading
 import time
 from pathlib import Path
 from rpc_interactions import Interactions
+from turn_health import TurnHealth
 
 ROOT = Path(__file__).resolve().parent.parent
 CODEX_EXE = ROOT / "app" / "codex-app-server.exe"
@@ -35,6 +36,7 @@ class CodexRpc:
         self._closed = False
         self._pending = set()
         self.interactions = Interactions(self._send)
+        self.health = TurnHealth(Path.home() / '.codex')
         threading.Thread(target=self._read_stdout, daemon=True).start()
         threading.Thread(target=self._drain_stderr, daemon=True).start()
         self.call("initialize", {
@@ -57,29 +59,37 @@ class CodexRpc:
     def _read_stdout(self):
         try:
             for line in self.process.stdout:
-                try: message = json.loads(line)
-                except json.JSONDecodeError: continue
+                try:
+                    message = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
                 if not isinstance(message, dict): continue
                 if "method" in message:
                     try:
-                        if "id" in message: self.interactions.request(message)
-                        else: self.interactions.notification(message["method"], message.get("params") or {})
+                        if "id" in message:
+                            self.interactions.request(message)
+                        else:
+                            self.health.notification(message["method"], message.get("params") or {})
+                            self.interactions.notification(message["method"], message.get("params") or {})
                     except (ValueError, TypeError, KeyError, AttributeError):
                         if "id" in message:
                             self._send({"id": message["id"], "error": {"code": -32602, "message": "Unsupported interaction format"}})
                 elif "id" in message:
                     with self._condition:
-                        if str(message["id"]) in self._pending: self._responses[str(message["id"])] = message
+                        if str(message["id"]) in self._pending:
+                            self._responses[str(message["id"])] = message
                         self._condition.notify_all()
-        except (OSError, RuntimeError): pass
+        except (OSError, RuntimeError):
+            pass
         finally:
             with self._condition:
-                self._closed = True; self._condition.notify_all()
+                self._closed = True
+                self._condition.notify_all()
             self.interactions.disconnect()
 
     def _drain_stderr(self):
-        for _ in self.process.stderr:
-            pass
+        for line in self.process.stderr:
+            self.health.stderr(line)
 
     def call(self, method, params, timeout=30):
         with self._condition:
@@ -91,14 +101,17 @@ class CodexRpc:
             deadline = time.monotonic() + timeout
             with self._condition:
                 while request_id not in self._responses:
-                    if self._closed: raise RuntimeError("Codex 连接已关闭")
+                    if self._closed:
+                        raise RuntimeError("Codex 连接已关闭")
                     remaining = deadline - time.monotonic()
-                    if remaining <= 0: raise TimeoutError(f"Codex RPC 超时：{method}")
+                    if remaining <= 0:
+                        raise TimeoutError(f"Codex RPC 超时：{method}")
                     self._condition.wait(remaining)
                 response = self._responses.pop(request_id)
         finally:
             with self._condition:
-                self._pending.discard(request_id); self._responses.pop(request_id, None)
+                self._pending.discard(request_id)
+                self._responses.pop(request_id, None)
         if "error" in response:
             raise RuntimeError(f"Codex RPC 错误：{response['error']}")
         return response.get("result")

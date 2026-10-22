@@ -1,5 +1,3 @@
-+// SPDX-License-Identifier: MIT
-// Copyright (c) 2026 xiyannan
 /* Shared with cloud/web/interactions.js. Human replies are not ordinary chat messages. */
 (() => {
   'use strict';

@@ -11,12 +11,14 @@
   <link rel="stylesheet" href="/voice.css?v=20260916-voice-dock">
   <link rel="stylesheet" href="/projects.css">
   <link rel="stylesheet" href="/thread-browser.css">
-  <link rel="stylesheet" href="/mobile.css">
+  <link rel="stylesheet" href="/mobile.css?v=20260924-weekly-quota">
   <link rel="stylesheet" href="/feishu-auth.css">
   <link rel="stylesheet" href="/local-composer.css?v=20260915-active-sync">
-  <link rel="stylesheet" href="/local-polish.css?v=20260828-1">
+  <link rel="stylesheet" href="/local-polish.css?v=20260924-weekly-quota">
   <link rel="stylesheet" href="/quota.css?v=20260924-weekly-quota-size">
   <link rel="stylesheet" href="/model-picker.css?v=20261005-fast-mode">
+  <link rel="stylesheet" href="/markdown.css?v=20261018-markdown">
+  <link rel="stylesheet" href="/turn-health.css?v=20261019-thread-activity">
 </head>
 <body>
   <section id="auth-gate" class="auth-gate" hidden>
@@ -65,22 +67,27 @@
       <div id="messages" class="messages">
         <div class="empty"><div class="empty-icon">↖</div><h3>选择一个对话开始工作</h3><p>网页任务默认只在网页显示；运行中继续发送会作为补充引导。</p></div>
       </div>
+      <section id="turn-health" class="turn-health" role="status" aria-live="polite" hidden></section>
       <section id="task-strip" class="task-strip" hidden></section>
       <form id="composer" class="composer">
         <label class="file-button" title="添加图片或轻量文件">＋<input id="files" type="file" multiple accept=".jpg,.jpeg,.png,.webp,.gif,.bmp,.pdf,.doc,.docx,.xls,.xlsx,.csv,.ppt,.pptx,.txt,.md"></label>
-        <textarea id="prompt" rows="1" aria-label="输入发送给 Codex 的内容"></textarea>
+        <textarea id="prompt" rows="1" aria-label="输入发送给 Codex 的内容" placeholder="输入内容，或 Ctrl+V 粘贴截图"></textarea>
         <button id="send" type="submit">发送</button>
       </form>
       <div id="file-list" class="file-list" hidden></div>
     </section>
   </main>
   <script src="https://lf-scm-cn.feishucdn.com/lark/op/h5-js-sdk-1.5.44.js"></script>
+  <script src="/lib/markdown-it-15.0.3.min.js"></script>
+  <script src="/markdown.js?v=20261018-markdown"></script>
+  <script src="/project-display.js?v=20261016-desktop-projects"></script>
   <script src="/model-picker.js?v=20261005-fast-mode"></script>
   <script src="/voice-ui.js?v=20260916-voice-dock"></script>
   <link rel="stylesheet" href="/thread-organizer.css?v=20260920-visibility-ui">
-  <script src="/thread-organizer.js?v=20260920-projects"></script>
-  <script src="/app.js?v=20261006-early-threads"></script>
-  <script src="/local-composer.js?v=20261005-clipboard-image"></script>
+  <script src="/thread-organizer.js?v=20261016-desktop-projects"></script>
+  <script src="/turn-health.js?v=20261022-sync-age"></script>
+  <script src="/app.js?v=20261022-sync-age"></script>
+  <script src="/local-composer.js?v=20261016-desktop-projects"></script>
   <link rel="stylesheet" href="/interactions.css?v=20260919">
   <script src="/interactions.js?v=20260919"></script>
   <script src="/thread-visibility.js?v=20260920-visibility-ui"></script>

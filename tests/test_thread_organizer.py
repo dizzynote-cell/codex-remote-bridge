@@ -19,6 +19,17 @@ THREAD_ID = "12345678-1234-4234-8234-123456789abc"
 
 
 class LocalOrganizerTests(unittest.TestCase):
+    def test_continuation_inherits_source_project(self):
+        with tempfile.TemporaryDirectory() as directory:
+            organizer = local.Organizer(Path(directory) / "organizer.json")
+            projects = [{"cwd": r"D:\Projects\Example"}]
+            nested = r"D:\Projects\Example\web-app"
+            self.assertEqual(local.continuation_project(THREAD_ID, nested, projects, organizer), projects[0]["cwd"])
+            self.assertIsNone(local.continuation_project(THREAD_ID, projects[0]["cwd"] + "-other", projects, organizer))
+            organizer.update(THREAD_ID, project=r"C:\Custom\Group")
+            self.assertEqual(local.continuation_project(THREAD_ID, nested, projects, organizer), r"C:\Custom\Group")
+            self.assertIsNone(local.continuation_project("", nested, projects, organizer))
+
     def test_persists_and_merges_newer_cloud_state(self):
         with tempfile.TemporaryDirectory() as directory:
             organizer = local.Organizer(Path(directory) / "organizer.json")

@@ -1,0 +1,19 @@
+.markdown-body{white-space:normal;min-width:0;overflow-wrap:anywhere;line-height:1.7}
+.markdown-body>:first-child{margin-top:0}.markdown-body>:last-child{margin-bottom:0}
+.markdown-body p{margin:0 0 .85em}.markdown-body h1,.markdown-body h2,.markdown-body h3,.markdown-body h4{line-height:1.45;margin:1.2em 0 .6em;font-weight:650;color:var(--text)}
+.markdown-body h1{font-size:1.4em}.markdown-body h2{font-size:1.25em}.markdown-body h3{font-size:1.12em}.markdown-body h4{font-size:1em}
+.markdown-body ul,.markdown-body ol{margin:.5em 0 1em;padding-left:1.7em}.markdown-body li{margin:.3em 0}.markdown-body li>p{margin:.4em 0}
+.markdown-body a{color:var(--accent,#64d9a4);text-decoration:underline;text-underline-offset:3px;overflow-wrap:anywhere}
+.markdown-body blockquote{margin:.8em 0;padding:.2em 1em;border-left:3px solid #46566b;color:var(--muted,#b8c1cf)}
+.markdown-body hr{margin:1.2em 0;border:0;border-top:1px solid var(--line,#303641)}
+.markdown-body code{font-family:Consolas,'Cascadia Code',monospace;font-size:.9em;background:#232c38;border:1px solid #344050;border-radius:4px;padding:.1em .3em}
+.markdown-body pre{max-width:100%;overflow-x:auto;white-space:pre;overflow-wrap:normal;word-break:normal;background:#0c1016;border:1px solid var(--line,#303641);border-radius:9px;padding:13px 15px;margin:.8em 0;line-height:1.6;tab-size:4}
+.markdown-body pre code{background:none;border:0;border-radius:0;padding:0;white-space:pre;overflow-wrap:normal;word-break:normal}
+.markdown-table{width:100%;max-width:100%;overflow-x:auto;margin:1em 0;border:1px solid var(--line,#303641);border-radius:9px;overscroll-behavior-x:contain;-webkit-overflow-scrolling:touch}
+.markdown-table:focus-visible{outline:2px solid var(--accent,#64d9a4);outline-offset:2px}
+.markdown-table table{border-collapse:collapse;width:100%;min-width:28rem;font-size:inherit;line-height:1.6}
+.markdown-table th,.markdown-table td{text-align:left;vertical-align:top;padding:10px 12px;min-width:90px;border-right:1px solid var(--line,#303641);border-bottom:1px solid var(--line,#303641);white-space:normal;overflow-wrap:anywhere}
+.markdown-table th{background:#202a35;font-weight:650;color:var(--text,#e7edf5)}.markdown-table tbody tr:nth-child(even){background:#ffffff04}
+.markdown-table th:last-child,.markdown-table td:last-child{border-right:0}.markdown-table tbody tr:last-child td{border-bottom:0}
+.markdown-fallback{white-space:pre-wrap}.assistant .bubble{min-width:0;max-width:100%}
+@media(max-width:640px){.markdown-table th,.markdown-table td{padding:8px 10px;font-size:12px}.markdown-body pre{padding:10px;font-size:12px}}

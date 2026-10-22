@@ -27,3 +27,13 @@ caddy/Caddyfile
 cloud/uploads/
 release-private/
 cloud/.env.generated
+
+# Credentials, local Codex state and runtime staging must never ship.
+.env
+.env.*
+!.env.example
+auth.json
+.codex/
+*.sqlite
+*.sqlite-*
+.runtime-stage-*/

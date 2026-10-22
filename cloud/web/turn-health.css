@@ -1,0 +1,3 @@
+.turn-health{flex:0 0 auto;margin:6px 10px;padding:9px 12px;border:1px solid #68512c;border-left:3px solid #e4ad54;border-radius:9px;background:#2b2418;color:#f0cb8c;font-size:12px;line-height:1.6;white-space:normal;overflow-wrap:anywhere}
+.turn-health[hidden]{display:none}.turn-health[data-kind="no_progress"]{background:#24251f;border-color:#555841;color:#d2d3b7}
+.turn-health[data-kind="activity"]{background:#14261f;border-color:#29483c;border-left-color:#57d99a;color:#a9ddc5}.turn-health[data-kind="failed"]{background:#302022;border-color:#674248;border-left-color:#ef7d88;color:#f0aeb6}
