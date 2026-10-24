@@ -210,13 +210,16 @@ class RelayTests(unittest.TestCase):
 
 class HttpTests(unittest.TestCase):
     def setUp(self):
+        auth_spec=importlib.util.spec_from_file_location('cloud_auth_rate_limit',ROOT/'cloud/auth_rate_limit.py')
+        auth_module=importlib.util.module_from_spec(auth_spec);auth_spec.loader.exec_module(auth_module)
         self.db=sqlite3.connect(':memory:',check_same_thread=False)
         self.db.execute('CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT)');relay.initialize(self.db)
         tree=ast.parse((ROOT/'cloud/app.py').read_text(encoding='utf-8'))
         body=[x for x in tree.body if isinstance(x,ast.ClassDef) and x.name=='H' or isinstance(x,ast.FunctionDef) and x.name=='cookie_token']
         self.ns={'BaseHTTPRequestHandler':BaseHTTPRequestHandler,'json':json,'time':time,'SimpleCookie':SimpleCookie,
                  'urlparse':urlparse,'parse_qs':parse_qs,'secrets':secrets,'SYNC_TOKEN':'test-only-token',
-                 'SESSIONS':{'test-session':time.time()+60},'interactions':relay,'db':self.db,'DB_LOCK':threading.RLock()}
+                 'SESSIONS':{'test-session':time.time()+60},'interactions':relay,'db':self.db,'DB_LOCK':threading.RLock(),
+                 'AUTH_LIMITER':auth_module.FailedAuthLimiter(),'client_ip':auth_module.client_ip,'OAUTH_STATES':{}}
         exec(compile(ast.Module(body=body,type_ignores=[]),'cloud-handler','exec'),self.ns)
         self.server=ThreadingHTTPServer(('127.0.0.1',0),self.ns['H'])
         self.thread=threading.Thread(target=self.server.serve_forever,daemon=True);self.thread.start()

@@ -6,6 +6,7 @@
 import base64, binascii, hashlib, json, os, re, secrets, shutil, sqlite3, time, uuid
 import interactions
 import thread_organizer
+from auth_rate_limit import FailedAuthLimiter, client_ip
 from thread_visibility import Visibility
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -17,6 +18,7 @@ ROOT=Path(__file__).resolve().parent; WEB=ROOT/'web'; DB=Path(os.getenv('CODEX_H
 APP_ID=os.environ['FEISHU_APP_ID']; APP_SECRET=os.environ['FEISHU_APP_SECRET']; OWNER=os.environ['FEISHU_OWNER_OPEN_ID']; SYNC_TOKEN=os.environ['SYNC_TOKEN']
 PUBLIC_BASE_URL=os.environ['PUBLIC_BASE_URL'].rstrip('/'); CLIENT_PROJECTS_ROOT=os.getenv('CLIENT_PROJECTS_ROOT',''); CLIENT_STANDALONE_DIR=os.getenv('CLIENT_STANDALONE_DIR','')
 SESSIONS={}; OAUTH_STATES={}
+AUTH_LIMITER=FailedAuthLimiter()
 DB.parent.mkdir(parents=True,exist_ok=True); UPLOADS.mkdir(parents=True,exist_ok=True)
 db=sqlite3.connect(DB,check_same_thread=False)
 db.execute('PRAGMA journal_mode=WAL'); db.execute('PRAGMA busy_timeout=5000')
@@ -126,7 +128,37 @@ def text_value(value):
     return json.dumps(value,ensure_ascii=False,separators=(',',':'))
 
 class H(BaseHTTPRequestHandler):
+    def rate_key(self):
+        path=urlparse(self.path).path
+        lane='device' if path.startswith('/api/device/') or path=='/api/sync' else 'browser'
+        return lane+':'+client_ip(self.client_address[0],self.headers.get('X-Forwarded-For',''))
+    def auth_gate(self):
+        path=urlparse(self.path).path
+        if not path.startswith('/api/') or path=='/api/auth/config':return True
+        device=path.startswith('/api/device/') or path=='/api/sync'
+        valid=(bool(SYNC_TOKEN) and secrets.compare_digest(self.headers.get('Authorization') or '',f'Bearer {SYNC_TOKEN}')) if device else self.authed()
+        if valid:
+            AUTH_LIMITER.success(self.rate_key())
+            return True
+        # A legitimate login already in progress may finish and clear a lockout.
+        if path=='/api/auth/oauth/callback':
+            state=(parse_qs(urlparse(self.path).query).get('state') or [''])[0]
+            pending=OAUTH_STATES.get(state)
+            if pending and pending[0]>time.time():return True
+        remaining=AUTH_LIMITER.remaining(self.rate_key())
+        if not remaining:return True
+        self.rate_limited(remaining)
+        return False
+    def rate_limited(self,remaining):
+        b=json.dumps({'error':'auth_rate_limited','retryAfter':remaining,'message':f'认证失败次数过多，请在 {remaining} 秒后重试。'},ensure_ascii=False).encode()
+        self.send_response(429);self.send_header('Content-Type','application/json; charset=utf-8')
+        self.send_header('Cache-Control','no-store');self.send_header('Retry-After',str(remaining))
+        self.send_header('Content-Length',str(len(b)));self.end_headers();self.wfile.write(b)
     def json(self,p,status=200,cookie=None):
+        rejected=status==401 or (urlparse(self.path).path.startswith('/api/auth/') and status in {400,403})
+        if rejected:
+            remaining=AUTH_LIMITER.failure(self.rate_key())
+            if remaining:return self.rate_limited(remaining)
         b=json.dumps(p,ensure_ascii=False).encode(); self.send_response(status); self.send_header('Content-Type','application/json; charset=utf-8'); self.send_header('Cache-Control','no-store'); self.send_header('Content-Length',str(len(b)))
         if cookie:self.send_header('Set-Cookie',cookie)
         self.end_headers(); self.wfile.write(b)
@@ -137,6 +169,7 @@ class H(BaseHTTPRequestHandler):
         if cookie:self.send_header('Set-Cookie',cookie)
         self.end_headers()
     def new_session(self):
+        AUTH_LIMITER.success(self.rate_key())
         token=secrets.token_urlsafe(32); SESSIONS[token]=time.time()+30*86400
         return f'codex_history={token}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age={30*86400}'
     def exchange_feishu_code(self,code):
@@ -144,6 +177,7 @@ class H(BaseHTTPRequestHandler):
         user=post_json('https://open.feishu.cn/open-apis/authen/v1/access_token',{'grant_type':'authorization_code','code':code},{'Authorization':'Bearer '+app['app_access_token']})
         return user.get('data') or {}
     def do_GET(self):
+        if not self.auth_gate():return
         p=urlparse(self.path)
         if p.path=='/api/auth/config':return self.json({'appId':APP_ID,'authRequired':True,'authenticated':self.authed(),'ownerConfigured':True,'projectsRoot':CLIENT_PROJECTS_ROOT,'standaloneDir':CLIENT_STANDALONE_DIR})
         if p.path=='/api/auth/oauth/start':
@@ -296,6 +330,9 @@ class H(BaseHTTPRequestHandler):
         if not f.is_file() or WEB.resolve() not in f.parents:return self.send_error(404)
         b=f.read_bytes(); ct={'.html':'text/html','.js':'application/javascript','.css':'text/css'}.get(f.suffix,'application/octet-stream'); self.send_response(200); self.send_header('Content-Type',ct+'; charset=utf-8'); self.send_header('Cache-Control','no-cache, no-store, must-revalidate'); self.send_header('Pragma','no-cache'); self.send_header('Expires','0'); self.send_header('Content-Length',str(len(b))); self.end_headers(); self.wfile.write(b)
     def do_POST(self):
+        if not self.auth_gate():
+            self.close_connection=True
+            return
         try:n=int(self.headers.get('Content-Length') or 0)
         except ValueError:return self.json({'error':'invalid_content_length'},400)
         if not 0<=n<=24*1024*1024:
@@ -513,7 +550,11 @@ class H(BaseHTTPRequestHandler):
                 return self.json({'ok':True})
             except (ValueError,TypeError):return self.json({'error':'invalid_payload'},400)
         if p.path=='/api/auth/feishu':
-            code=json.loads(body).get('code',''); identity=self.exchange_feishu_code(code)
+            try:code=json.loads(body).get('code','')
+            except (ValueError,AttributeError):return self.json({'error':'invalid_login_payload'},400)
+            if not isinstance(code,str) or not code:return self.json({'error':'invalid_login_payload'},400)
+            try:identity=self.exchange_feishu_code(code)
+            except Exception:return self.json({'error':'feishu_oauth_failed'},502)
             if identity.get('open_id')!=OWNER:return self.json({'error':'owner_mismatch'},403)
             return self.json({'ok':True},cookie=self.new_session())
         self.send_error(404)

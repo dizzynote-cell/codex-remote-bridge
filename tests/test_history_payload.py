@@ -35,7 +35,7 @@ class HistoryPayloadTests(unittest.TestCase):
         method = next(n for n in handler.body if isinstance(n, ast.FunctionDef) and n.name == 'do_POST')
         scope = {'DB_LOCK': lock}
         exec(compile(ast.Module(body=[method], type_ignores=[]), '<do_POST>', 'exec'), scope)
-        obj = SimpleNamespace(headers={'Content-Length': str(length)}, rfile=reader,
+        obj = SimpleNamespace(headers={'Content-Length': str(length)}, rfile=reader, auth_gate=lambda:True,
                               connection=SimpleNamespace(settimeout=lambda _: None),
                               _do_POST=lambda body: calls.append(body),
                               json=lambda body, status: calls.append(status))

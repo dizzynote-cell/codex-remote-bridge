@@ -49,5 +49,10 @@ Write-Host '[6/6] Dependencies and auto-start' -ForegroundColor Cyan
 & $python.Source -m pip install -r (Join-Path $root 'requirements.txt'); & (Join-Path $root 'sync-codex-runtime.ps1')
 $enableAuto=Ask 'Enable bridge auto-start after Windows sign-in? (Y/N)' 'Y'; if($enableAuto -match '^[Yy]'){& (Join-Path $root 'set-autostart.ps1') Enable}
 $installTccli=Ask 'Install Tencent Cloud CLI for optional DNS/server setup? (Y/N)' 'N'; if($installTccli -match '^[Yy]'){& $python.Source -m pip install tccli}
+$desktopShortcut=(New-Object -ComObject WScript.Shell).CreateShortcut((Join-Path ([Environment]::GetFolderPath('Desktop')) 'Codex Remote Bridge.lnk'))
+$desktopShortcut.TargetPath=Join-Path $root 'Codex Remote Bridge.cmd'
+$desktopShortcut.WorkingDirectory=$root
+$desktopShortcut.IconLocation=(Join-Path $root 'assets\codexlogo.ico')+',0'
+$desktopShortcut.Save()
 Start-Process powershell.exe -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-WindowStyle','Hidden','-File',(Join-Path $root 'tray.ps1')) -WindowStyle Hidden
 Write-Host 'Setup completed. The tray icon is now running.' -ForegroundColor Green

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 xiyannan
 # Project: Codex Remote Bridge
+param([switch]$TrayOnly)
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
@@ -10,11 +11,9 @@ $mutex = [Threading.Mutex]::new($true,'Local\CodexRemoteBridgeTray',[ref]$create
 if(-not $created){exit 0}
 $dataDir=Join-Path $root 'data'; $logsDir=Join-Path $root 'logs'; $bridgePidFile=Join-Path $dataDir 'bridge.pid'; $watchdogPidFile=Join-Path $dataDir 'watchdog.pid'
 function Is-ProcessRunning($pidFile){if(-not(Test-Path -LiteralPath $pidFile)){return $false};$id=0;if(-not[int]::TryParse((Get-Content -LiteralPath $pidFile -ErrorAction SilentlyContinue),[ref]$id)){return $false};return [bool](Get-Process -Id $id -ErrorAction SilentlyContinue)}
-function New-StatusIcon([Drawing.Color]$color){$bmp=[Drawing.Bitmap]::new(32,32);$g=[Drawing.Graphics]::FromImage($bmp);$g.SmoothingMode='AntiAlias';$g.Clear([Drawing.Color]::Transparent);$brush=[Drawing.SolidBrush]::new($color);$g.FillEllipse($brush,3,3,26,26);$font=[Drawing.Font]::new('Segoe UI',[single]13,[Drawing.FontStyle]::Bold);$white=[Drawing.SolidBrush]::new([Drawing.Color]::White);$g.DrawString('C',$font,$white,7,5);$icon=[Drawing.Icon]::FromHandle($bmp.GetHicon());$white.Dispose();$font.Dispose();$brush.Dispose();$g.Dispose();$bmp.Dispose();return $icon}
+$iconPath=Join-Path $root 'assets\codexlogo.ico'
 $icons=@{}
-$icons.on=New-StatusIcon ([Drawing.Color]::FromArgb(52,199,120))
-$icons.starting=New-StatusIcon ([Drawing.Color]::FromArgb(245,158,11))
-$icons.off=New-StatusIcon ([Drawing.Color]::FromArgb(220,68,68))
+foreach($state in @('on','starting','off')){$icons[$state]=[Drawing.Icon]::new($iconPath,32,32)}
 $notify=New-Object Windows.Forms.NotifyIcon;$notify.Icon=$icons.off;$notify.Text='Codex Remote Bridge: OFF';$notify.Visible=$true
 $menu=New-Object Windows.Forms.ContextMenuStrip
 $statusItem=$menu.Items.Add('Status: OFF');$statusItem.Enabled=$false
@@ -32,4 +31,4 @@ $autoItem.add_Click({if($autoItem.Checked){& (Join-Path $root 'set-autostart.ps1
 $exitItem.add_Click({$notify.Text='Codex Remote Bridge: STOPPING';$notify.Icon=$icons.starting;& (Join-Path $root 'stop-bridge.ps1');$notify.Visible=$false;[Windows.Forms.Application]::Exit()})
 $timer=New-Object Windows.Forms.Timer;$timer.Interval=2500
 $timer.add_Tick({$bridge=Is-ProcessRunning $bridgePidFile;$watchdog=Is-ProcessRunning $watchdogPidFile;if($bridge){$notify.Icon=$icons.on;$notify.Text='Codex Remote Bridge: ON';$statusItem.Text='Status: ON';$startItem.Enabled=$false;$restartItem.Enabled=$true;$stopItem.Enabled=$true}elseif($watchdog){$notify.Icon=$icons.starting;$notify.Text='Codex Remote Bridge: STARTING';$statusItem.Text='Status: STARTING';$startItem.Enabled=$false;$restartItem.Enabled=$false;$stopItem.Enabled=$true}else{$notify.Icon=$icons.off;$notify.Text='Codex Remote Bridge: OFF';$statusItem.Text='Status: OFF';$startItem.Enabled=$true;$restartItem.Enabled=$false;$stopItem.Enabled=$false};$autoItem.Checked=[bool](Get-ScheduledTask -TaskName 'Codex Remote Bridge' -ErrorAction SilentlyContinue)})
-$timer.Start();Run-Script 'start-bridge.ps1';[Windows.Forms.Application]::Run();$timer.Stop();$notify.Dispose();foreach($icon in $icons.Values){$icon.Dispose()};$mutex.ReleaseMutex();$mutex.Dispose()
+$timer.Start();if(-not $TrayOnly){Run-Script 'start-bridge.ps1'};[Windows.Forms.Application]::Run();$timer.Stop();$notify.Dispose();foreach($icon in $icons.Values){$icon.Dispose()};$mutex.ReleaseMutex();$mutex.Dispose()

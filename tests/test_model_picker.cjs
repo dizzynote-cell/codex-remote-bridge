@@ -47,7 +47,7 @@ async function main(){
   p.thread({id:'thread-two',turns:[]});assert.equal(p.capture('thread-two').model,'a');
   p.begin('thread-one');p.thread({id:'thread-one',turns:[{status:'inProgress',bridgeModel:{requested:'a',effort:'low'}}]});
   assert.equal(p.capture('thread-one').model,'b');
-  assert.equal(section.querySelector('span').textContent,'');
+  assert.equal(section.querySelector('#model-running').textContent,'');
   assert.equal(p.capture('thread-one').followDefaults,false);
   assert.equal(p.capture('thread-one').effort,'high');
   assert.ok(!section.html.includes('model-follow'));
