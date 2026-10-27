@@ -37,6 +37,7 @@ import voice_tts
 from thread_organizer import Organizer, continuation_project
 from thread_visibility import Visibility
 from compaction_count import counter as compaction_counter
+from message_times import message_times
 from desktop_projects import DesktopProjects
 from turn_routing import reconcile as reconcile_turns, steer_or_idle, release_owned
 
@@ -530,7 +531,7 @@ def read_thread(thread_id: str) -> dict:
             "includeTurns": True,
         })
         reconcile_turns(active_turns, result.get('thread', {}))
-    thread = model_choices.enrich(result.get("thread", {}))
+    thread = message_times.enrich(model_choices.enrich(result.get("thread", {})))
     pending = codex_rpc.interactions.snapshot().get('requests') or []
     waiting = any(r.get('threadId') == thread_id and r.get('status') == 'pending' for r in pending)
     thread['bridgeHealth'] = codex_rpc.health.snapshot(thread, waiting=waiting)

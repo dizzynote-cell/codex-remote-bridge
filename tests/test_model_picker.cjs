@@ -12,9 +12,10 @@ class Element {
 async function main(){
   const document={nodes:{},querySelector(selector){return this.nodes[selector] ||= new Element();},createElement(){return new Element();}};
   const models=['a','b'].map(model=>({model,displayName:model,defaultReasoningEffort:'low',supportedReasoningEfforts:[{reasoningEffort:'low'},{reasoningEffort:'high'}]}));
-  let choices={},stamp=100,pendingResolve;
+  let choices={},stamp=100,pendingResolve,fetchCount=0;
   const context={document,Option:class{constructor(text,value){this.text=text;this.value=value;}},window:{},setInterval(){},Date,console,
     fetch:async (url,opts)=>{
+      fetchCount++;
       if(opts?.method==='POST'){const body=JSON.parse(opts.body);choices[body.threadId]={...body,updated:++stamp};}
       return {ok:true,json:async()=>({models,defaults:{model:'a',effort:'low'},choices})};
     }};
@@ -22,6 +23,10 @@ async function main(){
   vm.runInContext(fs.readFileSync(require('node:path').join(__dirname,'../web/model-picker.js'),'utf8'),context);
   const picker=context.window.modelPicker;
   await new Promise(r=>setImmediate(r));
+  const gate=document.querySelector('#auth-gate');gate.hidden=false;
+  const beforeAuth=fetchCount;await picker.refresh();
+  assert.equal(fetchCount,beforeAuth,'login screen must not create authentication failures by polling');
+  gate.hidden=true;await picker.refresh();assert.equal(fetchCount,beforeAuth+1);
   picker.begin('thread-one');picker.thread({id:'thread-one',turns:[]});
   assert.equal(picker.capture('thread-one').model,'a');
   assert.equal(picker.capture('thread-one').effort,'low');

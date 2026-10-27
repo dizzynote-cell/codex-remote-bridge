@@ -212,13 +212,17 @@ class HttpTests(unittest.TestCase):
     def setUp(self):
         auth_spec=importlib.util.spec_from_file_location('cloud_auth_rate_limit',ROOT/'cloud/auth_rate_limit.py')
         auth_module=importlib.util.module_from_spec(auth_spec);auth_spec.loader.exec_module(auth_module)
+        session_spec=importlib.util.spec_from_file_location('cloud_browser_sessions',ROOT/'cloud/browser_sessions.py')
+        session_module=importlib.util.module_from_spec(session_spec);session_spec.loader.exec_module(session_module)
+        self.session_store=session_module.BrowserSessions(':memory:')
+        self.session_token,_=self.session_store.create()
         self.db=sqlite3.connect(':memory:',check_same_thread=False)
         self.db.execute('CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT)');relay.initialize(self.db)
         tree=ast.parse((ROOT/'cloud/app.py').read_text(encoding='utf-8'))
         body=[x for x in tree.body if isinstance(x,ast.ClassDef) and x.name=='H' or isinstance(x,ast.FunctionDef) and x.name=='cookie_token']
         self.ns={'BaseHTTPRequestHandler':BaseHTTPRequestHandler,'json':json,'time':time,'SimpleCookie':SimpleCookie,
                  'urlparse':urlparse,'parse_qs':parse_qs,'secrets':secrets,'SYNC_TOKEN':'test-only-token',
-                 'SESSIONS':{'test-session':time.time()+60},'interactions':relay,'db':self.db,'DB_LOCK':threading.RLock(),
+                 'SESSION_STORE':self.session_store,'interactions':relay,'db':self.db,'DB_LOCK':threading.RLock(),
                  'AUTH_LIMITER':auth_module.FailedAuthLimiter(),'client_ip':auth_module.client_ip,'OAUTH_STATES':{}}
         exec(compile(ast.Module(body=body,type_ignores=[]),'cloud-handler','exec'),self.ns)
         self.server=ThreadingHTTPServer(('127.0.0.1',0),self.ns['H'])
@@ -226,9 +230,11 @@ class HttpTests(unittest.TestCase):
         self.base='http://127.0.0.1:'+str(self.server.server_port)
 
     def tearDown(self):
-        self.server.shutdown();self.server.server_close();self.thread.join();self.db.close()
+        self.server.shutdown();self.server.server_close();self.thread.join();self.db.close();self.session_store.close()
 
     def request(self,path,data=None,headers=None):
+        headers=dict(headers or {})
+        if headers.get('Cookie')=='codex_history=test-session':headers['Cookie']='codex_history='+self.session_token
         req=urllib.request.Request(self.base+path,data=json.dumps(data).encode() if data is not None else None,
             headers={'Content-Type':'application/json',**(headers or {})})
         try:r=urllib.request.urlopen(req,timeout=3)

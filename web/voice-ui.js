@@ -252,6 +252,7 @@
     finally{if(button)button.disabled=false;}
   }
   async function settings(){
+    if(window.bridgeLoading&&!window.bridgeLoading.allowed())return window.bridgeLoading.background('voice-settings',settings);
     if(settingsRefreshing)return;
     settingsRefreshing=true;
     try{prefs=await json('/api/preferences');config=await json('/api/voice/config');}
@@ -281,6 +282,7 @@
     };
     panel.querySelector('#use-reset-credit').onclick=resetCredit;
     settingsRefreshing=false;
+    window.dispatchEvent?.(new Event('bridge-voice-ready'));
   }
   function boot(){
     const details=document.querySelector('#quota-details');

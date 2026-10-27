@@ -252,11 +252,12 @@
     finally{if(button)button.disabled=false;}
   }
   async function settings(){
+    if(window.bridgeLoading&&!window.bridgeLoading.allowed())return window.bridgeLoading.background('voice-settings',settings);
     if(settingsRefreshing)return;
     settingsRefreshing=true;
     try{prefs=await json('/api/preferences');config=await json('/api/voice/config');}
     catch{settingsRefreshing=false;return;}
-    const quota=await json('/api/quota').catch(()=>({}));
+    const quota=await (window.codexQuotaRequest?.()||json('/api/quota')).catch(()=>({}));
     const details=document.querySelector('#quota-details');
     if(!details){settingsRefreshing=false;return;}
     details.querySelector('#voice-settings')?.remove();
@@ -281,6 +282,7 @@
     };
     panel.querySelector('#use-reset-credit').onclick=resetCredit;
     settingsRefreshing=false;
+    window.dispatchEvent?.(new Event('bridge-voice-ready'));
   }
   function boot(){
     const details=document.querySelector('#quota-details');

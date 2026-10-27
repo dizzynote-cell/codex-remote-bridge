@@ -18,8 +18,8 @@ async function drain() {for(let n=0;n<8;n++)await Promise.resolve();}
 function fixture(file) {
   const parent=new Element('section'),anchor=new Element('div');parent.append(anchor);
   let data={session:'session-one',startedAt:1,revision:0,available:true,requests:[]}, offline=false, release;
-  const posts=[];
-  const context={document:{querySelector:s=>s==='#messages'?anchor:null,createElement:t=>new Element(t)},
+  const posts=[],gate={hidden:true};let getCount=0;
+  const context={document:{querySelector:s=>s==='#messages'?anchor:s==='#auth-gate'?gate:null,createElement:t=>new Element(t)},
     window:{},URL,threads:[{id:'t1',name:'报告任务'},{id:'t2',name:'浏览器任务'}],setInterval(){},console,
     fetch:async(url,options={})=>{
       if(offline)throw new Error('offline');
@@ -28,10 +28,11 @@ function fixture(file) {
         return new Promise(resolve=>{release=(status='queued')=>resolve({ok:true,json:async()=>({ok:true,status})});});
       }
       const snapshot=structuredClone(data);
+      getCount++;
       return {ok:true,status:200,json:async()=>snapshot};
     }};
   vm.runInNewContext(fs.readFileSync(file,'utf8'),context,{filename:file});
-  return {parent,posts,context,setData:d=>{data=d;},getData:()=>data,setOffline:v=>{offline=v;},release:s=>release(s),
+  return {parent,posts,context,gate,getCount:()=>getCount,setData:d=>{data=d;},getData:()=>data,setOffline:v=>{offline=v;},release:s=>release(s),
     poll:async()=>{await context.window.bridgeInteractions.poll();await drain();}};
 }
 const web={id:'r1',session:'session-one',threadId:'t1',turnId:'u1',status:'pending',category:'web',kind:'questions',
@@ -43,6 +44,9 @@ const pc={id:'r2',session:'session-one',threadId:'t2',turnId:'u2',status:'pendin
 
 async function run(file) {
   const f=fixture(file);await drain();
+  const beforeAuth=f.getCount();f.gate.hidden=false;await f.poll();
+  assert.equal(f.getCount(),beforeAuth,'login screen must not poll protected interactions');
+  f.gate.hidden=true;await f.poll();assert.equal(f.getCount(),beforeAuth+1);
   f.setData({...f.getData(),requests:[web,pc]});await f.poll();
   const forms=all(f.parent,e=>e.tag==='form');assert.equal(forms.length,2);
   assert.equal(all(forms[1],e=>['input','textarea','select'].includes(e.tag)).length,0,'PC verification has no credential field');

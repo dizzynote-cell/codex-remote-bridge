@@ -7,6 +7,8 @@ import base64, binascii, hashlib, json, os, re, secrets, shutil, sqlite3, time, 
 import interactions
 import thread_organizer
 from auth_rate_limit import FailedAuthLimiter, client_ip
+from dsh_gateway import DshGateway
+from browser_sessions import BrowserSessions
 from thread_visibility import Visibility
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -17,8 +19,9 @@ from urllib.request import Request, urlopen
 ROOT=Path(__file__).resolve().parent; WEB=ROOT/'web'; DB=Path(os.getenv('CODEX_HISTORY_DB',ROOT/'data/history.db')); UPLOADS=DB.parent/'uploads'
 APP_ID=os.environ['FEISHU_APP_ID']; APP_SECRET=os.environ['FEISHU_APP_SECRET']; OWNER=os.environ['FEISHU_OWNER_OPEN_ID']; SYNC_TOKEN=os.environ['SYNC_TOKEN']
 PUBLIC_BASE_URL=os.environ['PUBLIC_BASE_URL'].rstrip('/'); CLIENT_PROJECTS_ROOT=os.getenv('CLIENT_PROJECTS_ROOT',''); CLIENT_STANDALONE_DIR=os.getenv('CLIENT_STANDALONE_DIR','')
-SESSIONS={}; OAUTH_STATES={}
+SESSION_STORE=BrowserSessions(DB.parent/'browser-sessions.db',owner=OWNER); OAUTH_STATES={}
 AUTH_LIMITER=FailedAuthLimiter()
+DSH_GATEWAY=DshGateway(os.environ.get('DSH_RELAY_TOKEN',''),os.environ.get('PUBLIC_BASE_URL',''),snapshot_path=DB.parent/'dsh-history.db',web_root=ROOT/'dsh-web')
 DB.parent.mkdir(parents=True,exist_ok=True); UPLOADS.mkdir(parents=True,exist_ok=True)
 db=sqlite3.connect(DB,check_same_thread=False)
 db.execute('PRAGMA journal_mode=WAL'); db.execute('PRAGMA busy_timeout=5000')
@@ -121,7 +124,9 @@ def post_json(url,payload,headers=None):
     req=Request(url,data=json.dumps(payload).encode(),headers={'Content-Type':'application/json',**(headers or {})},method='POST')
     with urlopen(req,timeout=20) as r:return json.loads(r.read())
 def cookie_token(h):
-    c=SimpleCookie(); c.load(h or ''); return c.get('codex_history').value if c.get('codex_history') else ''
+    try:
+        c=SimpleCookie(); c.load(h or ''); return c.get('codex_history').value if c.get('codex_history') else ''
+    except Exception:return ''
 def text_value(value):
     if value is None:return None
     if isinstance(value,(str,int,float,bool)):return str(value)
@@ -163,23 +168,32 @@ class H(BaseHTTPRequestHandler):
         if cookie:self.send_header('Set-Cookie',cookie)
         self.end_headers(); self.wfile.write(b)
     def authed(self):
-        t=cookie_token(self.headers.get('Cookie')); return SESSIONS.get(t,0)>time.time()
+        return SESSION_STORE.get(cookie_token(self.headers.get('Cookie'))) is not None
     def redirect(self,location,cookie=None):
         self.send_response(302); self.send_header('Location',location); self.send_header('Cache-Control','no-store')
         if cookie:self.send_header('Set-Cookie',cookie)
         self.end_headers()
     def new_session(self):
         AUTH_LIMITER.success(self.rate_key())
-        token=secrets.token_urlsafe(32); SESSIONS[token]=time.time()+30*86400
-        return f'codex_history={token}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age={30*86400}'
+        token,session=SESSION_STORE.create(self.headers.get('User-Agent',''))
+        return SESSION_STORE.cookie(token,session)
     def exchange_feishu_code(self,code):
         app=post_json('https://open.feishu.cn/open-apis/auth/v3/app_access_token/internal',{'app_id':APP_ID,'app_secret':APP_SECRET})
         user=post_json('https://open.feishu.cn/open-apis/authen/v1/access_token',{'grant_type':'authorization_code','code':code},{'Authorization':'Bearer '+app['app_access_token']})
         return user.get('data') or {}
+    def do_HEAD(self):
+        if getattr(self,'path','').startswith(('/dsh','/api/providers','/api/device/dsh-relay/')) and DSH_GATEWAY.handle(self):return
+        self.send_error(405)
     def do_GET(self):
+        if getattr(self,'path','').startswith(('/dsh','/api/providers','/api/device/dsh-relay/')) and DSH_GATEWAY.handle(self):return
         if not self.auth_gate():return
         p=urlparse(self.path)
-        if p.path=='/api/auth/config':return self.json({'appId':APP_ID,'authRequired':True,'authenticated':self.authed(),'ownerConfigured':True,'projectsRoot':CLIENT_PROJECTS_ROOT,'standaloneDir':CLIENT_STANDALONE_DIR})
+        if p.path=='/api/auth/config':
+            session=SESSION_STORE.get(cookie_token(self.headers.get('Cookie')))
+            return self.json({'appId':APP_ID,'authRequired':True,'authenticated':bool(session),'ownerConfigured':True,'session':session,'projectsRoot':CLIENT_PROJECTS_ROOT,'standaloneDir':CLIENT_STANDALONE_DIR})
+        if p.path=='/api/auth/sessions':
+            if not self.authed():return self.json({'error':'feishu_login_required'},401)
+            return self.json({'sessions':SESSION_STORE.list(cookie_token(self.headers.get('Cookie')))})
         if p.path=='/api/auth/oauth/start':
             query=parse_qs(p.query); return_to=(query.get('return_to') or ['/'])[0]
             if not return_to.startswith('/') or return_to.startswith('//'):return_to='/'
@@ -330,6 +344,7 @@ class H(BaseHTTPRequestHandler):
         if not f.is_file() or WEB.resolve() not in f.parents:return self.send_error(404)
         b=f.read_bytes(); ct={'.html':'text/html','.js':'application/javascript','.css':'text/css'}.get(f.suffix,'application/octet-stream'); self.send_response(200); self.send_header('Content-Type',ct+'; charset=utf-8'); self.send_header('Cache-Control','no-cache, no-store, must-revalidate'); self.send_header('Pragma','no-cache'); self.send_header('Expires','0'); self.send_header('Content-Length',str(len(b))); self.end_headers(); self.wfile.write(b)
     def do_POST(self):
+        if getattr(self,'path','').startswith(('/dsh','/api/providers','/api/device/dsh-relay/')) and DSH_GATEWAY.handle(self):return
         if not self.auth_gate():
             self.close_connection=True
             return
@@ -347,10 +362,36 @@ class H(BaseHTTPRequestHandler):
         if len(body)!=n:
             self.close_connection=True
             return
+        # Authentication uses its own session store; Feishu network waits must
+        # never hold the history database lock.
+        if getattr(self,'path','').split('?',1)[0] in {'/api/auth/feishu','/api/auth/session/device','/api/auth/session/logout','/api/auth/sessions/revoke','/api/auth/sessions/revoke-others'}:
+            return self._do_POST(body)
         with DB_LOCK:
             return self._do_POST(body)
     def _do_POST(self,body):
         p=urlparse(self.path)
+        if p.path in {'/api/auth/session/device','/api/auth/session/logout','/api/auth/sessions/revoke','/api/auth/sessions/revoke-others'}:
+            if not self.authed():return self.json({'error':'feishu_login_required'},401)
+            origin=self.headers.get('Origin');site=self.headers.get('Sec-Fetch-Site')
+            if (origin and (urlparse(origin).netloc!=self.headers.get('Host') or (urlparse(origin).scheme!='https' and not (urlparse(origin).scheme=='http' and urlparse('http://'+self.headers.get('Host','')).hostname in {'localhost','127.0.0.1','::1'})))) or (site and site not in {'same-origin','none'}):return self.json({'error':'cross_origin'},403)
+            if not self.headers.get('Content-Type','').startswith('application/json'):return self.json({'error':'json_required'},415)
+            if len(body)>4096:return self.json({'error':'request_too_large'},413)
+            try:
+                data=json.loads(body or b'{}')
+                if not isinstance(data,dict):raise ValueError('invalid_payload')
+                token=cookie_token(self.headers.get('Cookie'))
+                if p.path=='/api/auth/session/device':
+                    replacement,session=SESSION_STORE.choose(token,data.get('mode'),data.get('name',''))
+                    return self.json({'ok':True,'session':session},cookie=SESSION_STORE.cookie(replacement,session))
+                if p.path=='/api/auth/session/logout':cleared=SESSION_STORE.revoke(token)
+                elif p.path=='/api/auth/sessions/revoke-others':cleared=SESSION_STORE.revoke(token,others=True)
+                else:
+                    identity=data.get('id')
+                    if not isinstance(identity,str) or not identity:raise ValueError('invalid_session_id')
+                    cleared=SESSION_STORE.revoke(token,identity=identity)
+                return self.json({'ok':True,'loggedOut':cleared},cookie=SESSION_STORE.clear_cookie() if cleared else None)
+            except PermissionError:return self.json({'error':'feishu_login_required'},401)
+            except (ValueError,TypeError):return self.json({'error':'invalid_session_preference'},400)
         if p.path=='/api/device/interactions':
             if not secrets.compare_digest(self.headers.get('Authorization') or '',f'Bearer {SYNC_TOKEN}'):return self.json({'error':'unauthorized'},401)
             try:return self.json(interactions.exchange(db,json.loads(body or b'{}')))

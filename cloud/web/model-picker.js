@@ -88,6 +88,8 @@
     row.classList.toggle('model-error', Boolean(error));
   }
   async function refresh() {
+    if(window.bridgeLoading&&!window.bridgeLoading.allowed())return;
+    if (document.querySelector("#auth-gate")?.hidden === false) return;
     if (loading) return;
     loading = true;
     try {

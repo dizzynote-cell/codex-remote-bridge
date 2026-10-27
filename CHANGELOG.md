@@ -1,7 +1,38 @@
 # 更新日志
 
+## Unreleased - account panel polish
+
+- Rename the footer entry and dialog to 登录设备管理. Keep the entry last after account or settings refreshes; constrain long panels to viewport height with touch scrolling.
+
+## Unreleased - DSH cloud snapshots
+
+- Serve DSH assets and read-only snapshots on the server, with independent outbound metadata/history sync and explicit stale/offline states.
+- Share device session management and prioritized startup; retain the existing non-replaying live command relay.
+
+## Unreleased - device sessions and loading priorities
+
+- Add explicit temporary (1 hour) or personal (7 days) sessions, hashed persistent tokens, device management and remote logout.
+- Render the conversation list before parallel auxiliary reads; prioritize selected history and share quota reads with voice settings.
+- Keep Feishu authentication network calls outside the history database lock.
+
+## Unreleased - startup performance
+
+- Wait for explicit conversation selection on entry and reload. Start list and account data independently of optional settings.
+- Start session validation in the document head; load the Feishu SDK only when needed inside Feishu.
+
+## Unreleased — 2026-10-27
+
+- Default to pinned conversations followed by recorded recent activity across projects; retain the project view and show list activity times.
+
+
+- Show recorded date and time beside user and assistant messages, including follow-up inputs. Missing timestamps stay explicitly unknown; browser-local formatting works on mobile.
+
 ## 未发布
 
+- 网页遇到 Codex 对话写入权被其他客户端占用时，显示明确的未发送提示与处理方式，保留失败状态，不自动重发。
+- 增加经过现有所有者登录验证的 `/dsh/` 转发入口，使用独立令牌与主机主动建立的 HTTPS 请求通道；无须开放主机入站端口或更改其他站点的反代。
+- 左上角 LOGO 可切换 Codex / DeepSeek Harness，保留各端的会话、草稿和待发附件；另一端离线时明确提示。
+- 登录验证期间暂停受保护接口的后台轮询，登录过期时保存草稿并进入原登录流程。
 - 云端新增连续认证失败限流：同一来源在 5 分钟内连续失败 8 次，第 8 次返回 429 并锁定 10 分钟；浏览器与设备认证分开计数，已有有效登录和正确同步令牌仍可通过。
 - 网页、系统托盘及桌面启动快捷方式统一使用新的 Codex Bridge 图标；支持单独刷新托盘而不启动或重启桥服务。
 - README 增加 PC 和手机界面截图，全部使用隔离的演示数据。

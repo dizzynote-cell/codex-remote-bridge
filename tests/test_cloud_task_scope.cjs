@@ -6,7 +6,7 @@ const functions = ['loadStatus','pollTask'].map(name => {
   return line.slice(line.indexOf(`async function ${name}(`));
 }).join('\n');
 (async () => {
-  const messages = [], context = vm.createContext({Date, Set, Map, console,
+  const messages = [], context = vm.createContext({Date, Set, Map, console, window:{},
     els:{mode:{}},taskStrip:{},renderActivityStatus(){},showTask(message){messages.push(message);},
     fetch:async()=>({json:async()=>({online:true,mode:'mobile',label:'在线',activeThreads:[{id:'b'}]})})});
   vm.runInContext(`let selected='b',lastGlobalActiveIds=new Set(),selectedCompletedUntil=0,

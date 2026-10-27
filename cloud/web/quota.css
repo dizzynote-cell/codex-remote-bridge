@@ -64,3 +64,14 @@
 body.mobile-ui .quota { width: 134px; min-width: 134px; min-height: 44px; padding: 8px; }
 body.mobile-ui .quota .quota-labels { gap: 5px; }
 body.mobile-ui .quota .quota-labels strong { font-size: 9px; }
+
+/* Keep long account details reachable on small screens without scrolling the chat. */
+.quota-details {
+  box-sizing: border-box;
+  max-height: min(70vh, calc(100vh - 110px));
+  max-height: min(70dvh, calc(100dvh - 110px - env(safe-area-inset-bottom, 0px)));
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-gutter: stable;
+}

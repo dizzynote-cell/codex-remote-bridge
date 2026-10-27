@@ -3,6 +3,30 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <script>
+// Begin session validation before the rest of the page assets arrive.
+window.bridgeAuthConfig = fetch('/api/auth/config', {cache:'no-store'}).then(response => {
+  if (!response.ok) throw new Error('Authentication status unavailable');
+  return response.json();
+});
+window.bridgeAuthConfig.catch(() => { window.bridgeAuthConfig = null; });
+const bridgeInsideFeishu = /feishu|lark/i.test(navigator.userAgent);
+if (!['localhost','127.0.0.1','[::1]'].includes(location.hostname) && !bridgeInsideFeishu) {
+  window.bridgeAuthConfig.then(config => {
+    if (config.authRequired && !config.authenticated && config.ownerConfigured)
+      location.replace('/api/auth/oauth/start?return_to=' + encodeURIComponent(location.pathname + location.search));
+  }).catch(() => {});
+}
+window.bridgeLoadFeishuSDK = () => new Promise(resolve => {
+  if (window.tt?.requestAccess || !bridgeInsideFeishu) { resolve(); return; }
+  const sdk = document.createElement('script'); sdk.async = true;
+  sdk.src = 'https://lf-scm-cn.feishucdn.com/lark/op/h5-js-sdk-1.5.44.js';
+  const timer = setTimeout(resolve, 8000);
+  sdk.onload = sdk.onerror = () => { clearTimeout(timer); resolve(); };
+  document.head.append(sdk);
+});
+</script>
+  <script defer src="/startup-scheduler.js?v=20261028"></script>
   <title>Codex Bridge</title>
   <link rel="stylesheet" href="/styles.css">
   <link rel="stylesheet" href="/mode.css">
@@ -15,14 +39,14 @@
   <link rel="stylesheet" href="/feishu-auth.css">
   <link rel="stylesheet" href="/local-composer.css?v=20260915-active-sync">
   <link rel="stylesheet" href="/local-polish.css?v=20260924-weekly-quota">
-  <link rel="stylesheet" href="/quota.css?v=20260924-weekly-quota-size">
+  <link rel="stylesheet" href="/quota.css?v=20261028-scroll-panels">
   <link rel="stylesheet" href="/model-picker.css?v=20261005-fast-mode">
   <link rel="stylesheet" href="/markdown.css?v=20261018-markdown">
   <link rel="stylesheet" href="/turn-health.css?v=20261019-thread-activity">
   <link rel="stylesheet" href="/branding.css?v=2a8cefffd749">
 </head>
 <body>
-  <section id="auth-gate" class="auth-gate" hidden>
+  <section id="auth-gate" class="auth-gate">
     <div class="auth-card">
       <div class="auth-logo" role="img" aria-label="Codex Remote Bridge"></div>
       <h2>正在验证飞书身份</h2>
@@ -78,19 +102,23 @@
       <div id="file-list" class="file-list" hidden></div>
     </section>
   </main>
-  <script src="https://lf-scm-cn.feishucdn.com/lark/op/h5-js-sdk-1.5.44.js"></script>
-  <script src="/lib/markdown-it-15.0.3.min.js"></script>
-  <script src="/markdown.js?v=20261018-markdown"></script>
-  <script src="/project-display.js?v=20261016-desktop-projects"></script>
-  <script src="/model-picker.js?v=20261005-fast-mode"></script>
-  <script src="/voice-ui.js?v=20260916-voice-dock"></script>
+  <script defer src="/lib/markdown-it-15.0.3.min.js"></script>
+  <script defer src="/markdown.js?v=20261018-markdown"></script>
+  <script defer src="/project-display.js?v=20261016-desktop-projects"></script>
+  <script defer src="/model-picker.js?v=20261028-staged-sessions"></script>
+  <script defer src="/voice-ui.js?v=20261028-staged-sessions"></script>
   <link rel="stylesheet" href="/thread-organizer.css?v=20260920-visibility-ui">
-  <script src="/thread-organizer.js?v=20261016-desktop-projects"></script>
-  <script src="/turn-health.js?v=20261022-sync-age"></script>
-  <script src="/app.js?v=20261022-sync-age"></script>
-  <script src="/local-composer.js?v=20261016-desktop-projects"></script>
+  <script defer src="/thread-organizer.js?v=20261016-desktop-projects"></script>
+  <script defer src="/turn-health.js?v=20261022-sync-age"></script>
+  <link rel="stylesheet" href="/message-time.css?v=20261027">
+  <script defer src="/message-time.js?v=20261027"></script>
+  <link rel="stylesheet" href="/thread-browser-controls.css?v=20261027">
+  <script defer src="/thread-browser-controls.js?v=20261027" data-provider="codex"></script>
+  <script defer src="/app.js?v=20261028-staged-sessions"></script>
+  <script defer src="/local-composer.js?v=20261016-desktop-projects"></script>
   <link rel="stylesheet" href="/interactions.css?v=20260919">
-  <script src="/interactions.js?v=20260919"></script>
-  <script src="/thread-visibility.js?v=20260920-visibility-ui"></script>
+  <script defer src="/interactions.js?v=20261028-staged-sessions"></script>
+  <script defer src="/thread-visibility.js?v=20260920-visibility-ui"></script>
+  <script defer src="/bridge-switcher.js?v=20261028-staged-sessions" data-provider="codex"></script>
 </body>
 </html>

@@ -29,13 +29,13 @@ class HistoryPayloadTests(unittest.TestCase):
         thread = {'turns': [{'items': [{'type': 'imageGeneration', 'result': 'image.png'}]}]}
         self.assertEqual(for_web(thread), thread)
 
-    def post_handler(self, reader, length, lock, calls):
+    def post_handler(self, reader, length, lock, calls, path=""):
         tree = ast.parse((ROOT / 'cloud/app.py').read_text(encoding='utf-8'))
         handler = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'H')
         method = next(n for n in handler.body if isinstance(n, ast.FunctionDef) and n.name == 'do_POST')
         scope = {'DB_LOCK': lock}
         exec(compile(ast.Module(body=[method], type_ignores=[]), '<do_POST>', 'exec'), scope)
-        obj = SimpleNamespace(headers={'Content-Length': str(length)}, rfile=reader, auth_gate=lambda:True,
+        obj = SimpleNamespace(path=path, headers={'Content-Length': str(length)}, rfile=reader, auth_gate=lambda:True,
                               connection=SimpleNamespace(settimeout=lambda _: None),
                               _do_POST=lambda body: calls.append(body),
                               json=lambda body, status: calls.append(status))
@@ -69,6 +69,20 @@ class HistoryPayloadTests(unittest.TestCase):
         calls = []
         self.post_handler(io.BytesIO(b''), 25*1024*1024, threading.RLock(), calls)()
         self.assertEqual(calls, [413])
+
+
+
+
+
+    def test_authentication_does_not_hold_history_lock(self):
+        class UnavailableHistoryLock:
+            def __enter__(self):
+                raise AssertionError('authentication must not wait on history lock')
+            def __exit__(self, *args):
+                return False
+        calls=[]
+        self.post_handler(io.BytesIO(b'{}'),2,UnavailableHistoryLock(),calls,path='/api/auth/feishu')()
+        self.assertEqual(calls,[b'{}'])
 
 
 if __name__ == '__main__':

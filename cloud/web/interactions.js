@@ -122,6 +122,8 @@
     finally { state.sending = false; refreshCard(state); poll(); }
   }
   async function poll() {
+    if(window.bridgeLoading&&!window.bridgeLoading.allowed())return;
+    if (document.querySelector("#auth-gate")?.hidden === false) return;
     if (running) return;
     running = true;
     try {

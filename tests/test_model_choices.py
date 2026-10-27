@@ -140,7 +140,7 @@ class CloudTests(unittest.TestCase):
                                     "FEISHU_OWNER_OPEN_ID": "test", "SYNC_TOKEN": "test-sync"}):
             exec(compile(tree, "<cloud-test>", "exec"), cls.env)
         sys.path.pop(0)
-        cls.env["SESSIONS"]["test-session"] = time.time() + 1000
+        cls.session_token, _ = cls.env["SESSION_STORE"].create()
         cls.server = cls.env["ThreadingHTTPServer"](("127.0.0.1", 0), cls.env["H"])
         cls.worker = threading.Thread(target=cls.server.serve_forever, daemon=True)
         cls.worker.start()
@@ -150,13 +150,15 @@ class CloudTests(unittest.TestCase):
         cls.server.shutdown()
         cls.server.server_close()
         cls.env["db"].close()
+        cls.env["SESSION_STORE"].close()
+        cls.env["DSH_GATEWAY"].snapshots.close()
         cls.temp.cleanup()
 
     def request(self, method, path, data=None, auth="user"):
         conn = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=5)
         headers = {"Content-Type": "application/json"}
         if auth == "user":
-            headers["Cookie"] = "codex_history=test-session"
+            headers["Cookie"] = "codex_history=" + self.session_token
         if auth == "device":
             headers["Authorization"] = "Bearer test-sync"
         conn.request(method, path, json.dumps(data) if data is not None else None, headers)
