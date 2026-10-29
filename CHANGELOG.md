@@ -1,5 +1,13 @@
 # 更新日志
 
+## Unreleased - optional desktop shortcut
+
+- 安装向导单独提供桌面桥快捷方式选项，与登录启动分开选择；快捷方式目标和图标均从当前安装目录生成。
+
+## Unreleased - task failure reasons
+
+- 本地与公网任务提示显示模型繁忙、额度或频率限制、上下文超限、认证和连接错误；重新打开对话及追加指令完成后仍按该轮错误显示原因，不自动重发任务。
+
 ## Unreleased - account panel polish
 
 - Rename the footer entry and dialog to 登录设备管理. Keep the entry last after account or settings refreshes; constrain long panels to viewport height with touch scrolling.

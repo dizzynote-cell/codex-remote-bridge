@@ -10,6 +10,28 @@
     if (minutes) return `${minutes}分 ${pad(rest)}秒`;
     return `${rest}秒`;
   };
+  // Interpret only the turn-level failure, never a recoverable tool error.
+  window.turnStatusMessage = turn => {
+    const status = typeof turn?.status === 'object' ? turn.status?.type : turn?.status;
+    const final = (turn?.items || []).some(i => i.type === 'agentMessage' && ['final_answer','final'].includes(i.phase));
+    if (status !== 'failed') return ({completed:'任务已完成', cancelled:'任务已取消',
+      interrupted:final ? '本轮已中断 · 已有回复，请确认结果是否完整' : '本轮已中断，未生成最终答案'})[status] || 'Codex 正在处理';
+    const error = turn?.error;
+    const code = typeof error?.codexErrorInfo === 'string' ? error.codexErrorInfo : JSON.stringify(error?.codexErrorInfo || '');
+    const detail = `${code} ${typeof error === 'string' ? error : error?.message || ''}`;
+    if (/serverOverloaded|at capacity|server overloaded|model.*overloaded/i.test(detail))
+      return '模型服务繁忙，本轮未完成。可稍后重试，或切换模型后继续。';
+    if (/usageLimitExceeded|rateLimit|rate.limit|quota.*exceeded|insufficient.*quota/i.test(detail))
+      return '模型额度或请求频率受限，本轮未完成。请查看额度和错误信息，恢复后再继续。';
+    if (/contextWindowExceeded|context.*(?:window|length).*exceed|maximum context length/i.test(detail))
+      return '对话上下文超出模型限制，本轮未完成。请压缩上下文或交接到新对话后继续。';
+    if (/unauthorized|authentication|invalid.*api.key|token.*expired/i.test(detail))
+      return '模型身份验证失败，本轮未完成。请检查 Codex 登录状态。';
+    if (/httpConnectionFailed|responseStream|stream.*(?:disconnect|closed)|connection.*(?:reset|closed|failed)|network|timed? ?out/i.test(detail))
+      return '模型连接中断或超时，本轮未完成。请先确认已有输出和进度，再决定是否继续。';
+    const safeCode = /^[a-zA-Z][a-zA-Z0-9_]{0,70}$/.test(code) ? `（${code}）` : '';
+    return `本轮执行失败${safeCode}。请检查已有输出和进度；具体原因暂未识别。`;
+  };
   const box = document.querySelector('#turn-health');
   if (!box) return;
   const cache = new Map(), terminal = new Set(['completed', 'failed', 'interrupted', 'cancelled']);
@@ -37,7 +59,7 @@
     if (!turn) return null;
     const status = state(turn);
     if (terminal.has(status)) return {kind: status === 'failed' ? 'failed' : 'activity', message:
-      ({completed:'本轮已完成', failed:'本轮执行失败，请查看任务错误', interrupted:'本轮已中断，请确认回复是否完整', cancelled:'本轮已取消'})[status]};
+      status === 'failed' ? window.turnStatusMessage(turn) : ({completed:'本轮已完成', interrupted:'本轮已中断，请确认回复是否完整', cancelled:'本轮已取消'})[status]};
     if (!running.has(status)) return null;
     const flags = typeof thread.status === 'object' ? thread.status.activeFlags || [] : [];
     if (flags.some(flag => /waitingFor(?:Approval|UserInput)/i.test(typeof flag === 'object' ? flag.type : flag)))

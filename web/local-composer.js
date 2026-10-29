@@ -25,8 +25,7 @@ const localTrackedTasks=new Map();
 let localRenderedThread=null;
 function localTerminal(turn){
   const status=typeof turn.status==='object'?turn.status?.type:turn.status;
-  const hasFinal=(turn.items||[]).some(i=>i.type==='agentMessage'&&['final_answer','final'].includes(i.phase));
-  return {status,message:({completed:'任务已完成',failed:'任务执行失败',cancelled:'任务已取消',interrupted:hasFinal?'本轮已中断 · 已有回复，请确认结果是否完整':'本轮已中断，未生成最终答案'})[status]||'Codex 正在处理'};
+  return {status,message:window.turnStatusMessage(turn)};
 }
 function renderLocalTracked(){
   const record=localTrackedTasks.get(selected);
