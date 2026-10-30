@@ -1,5 +1,9 @@
 # 更新日志
 
+## Unreleased - prevent duplicate conversation creation
+
+- 首次提交立即锁定新建对话表单并显示创建进度；收到实际创建结果或明确失败前不允许重复提交。明确失败保留参数，网络结果未确认时只查询状态、不自动重发。
+
 ## Unreleased - optional desktop shortcut
 
 - 安装向导单独提供桌面桥快捷方式选项，与登录启动分开选择；快捷方式目标和图标均从当前安装目录生成。
