@@ -6,6 +6,14 @@
 
 [查看版本更新日志](CHANGELOG.md)
 
+## 演示视频 · Video demo
+
+[下载演示视频 / Download the demo (MP4)](https://github.com/dizzynote-cell/codex-remote-bridge/releases/download/v0.2.16-beta/codex-remote-bridge-demo-zh-en.mp4) · 1:19 · 1080p · 中英双语字幕 / Chinese and English subtitles
+
+用手机或电脑浏览器接续家中 Windows 上的 Codex 对话，也可以切换到 DeepSeek Harness，选择模型和推理强度。
+
+Resume a Codex conversation on your home PC from a phone or desktop browser, then switch to DeepSeek Harness and choose a model and reasoning level.
+
 ## 界面预览
 
 以下截图来自公开版实际网页的隔离演示环境。项目、会话、模型名称和额度均为演示数据，不包含真实账户、授权或使用记录；模型与额度以你的实际账号返回为准。
