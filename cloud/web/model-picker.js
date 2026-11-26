@@ -87,6 +87,13 @@
     status.textContent = error;
     row.classList.toggle('model-error', Boolean(error));
   }
+  function applyCatalog(data) {
+    models = data.models || [];
+    defaults = data.defaults || {};
+    speedAvailable = data.speedModeSupported === true;
+    merge(data.choices);
+    paint();
+  }
   async function refresh() {
     if(window.bridgeLoading&&!window.bridgeLoading.allowed())return;
     if (document.querySelector("#auth-gate")?.hidden === false) return;
@@ -95,11 +102,13 @@
     try {
       const response = await fetch('/api/models', {cache:'no-store'});
       if (!response.ok) throw Error('模型设置暂不可用，请稍后刷新');
-      const data = await response.json();
-      models = data.models || [];
-      defaults = data.defaults || {};
-      speedAvailable = data.speedModeSupported === true;
-      merge(data.choices);
+      let data = await response.json();
+      if (data.refreshRequest) {
+        applyCatalog(data);
+        const update = await fetch('/api/models?after=' + encodeURIComponent(data.refreshRequest), {cache:'no-store'});
+        if (update.ok) data = await update.json();
+      }
+      applyCatalog(data);
       if (!pending) error = '';
     } catch (reason) { error = reason.message; }
     finally { loading = false; paint(); }
@@ -149,6 +158,5 @@
     label, refresh,
   };
   paint();
-  refresh();
-  setInterval(refresh, 10000);
+
 })();

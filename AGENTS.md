@@ -1,0 +1,17 @@
+﻿# Install Remote Bridge with a local coding agent
+
+Use this procedure when the user asks you to install or upgrade the bridge on their Windows PC. Work in the checked-out public repository.
+
+1. Ask which components the user wants and whether access is local or remote. Codex alone is supported. DeepSeek Harness is optional and runs in its own bridge checkout. Antigravity requires a DSH bridge release that explicitly ships its integration. Verify release capabilities from files and release notes before offering that component.
+2. Check Python 3.11+, availability of the Codex Windows app, the requested companion clients, and whether the configured ports are already in use. Identify existing bridge processes before making changes. The user completes client sign-in and any Feishu authorization in the client or browser.
+3. For Codex, preserve any existing `config/.env`. On a fresh install, use `config/.env.example` as a key reference and let the user enter their Feishu credentials into the local file. Use the interactive installer if they prefer. Leave the optional cloud settings empty for local use. Do not put secret values in chat, terminal output, Git, or commands with visible arguments.
+4. Once the local configuration is ready, run `powershell -NoProfile -File .\install.ps1 -UseExistingConfig -NoStart` to install dependencies and prepare the runtime. This mode leaves existing config, shortcuts and startup settings alone. For an existing installation, wait until its bridge is idle before refreshing runtime binaries or restarting. On a fresh install, start with `Codex Remote Bridge.cmd` and check `http://127.0.0.1:8765/api/status`. Offer desktop shortcuts and Windows sign-in startup separately.
+5. If requested, install the [DeepSeek Remote Bridge](https://github.com/dizzynote-cell/deepseek-remote-bridge) from its public repository using its own `install.ps1`. Reuse an existing configured checkout and keep its settings. For Codex menu integration, follow [the companion setup](docs/dual-bridge.md). The default paired local route is `http://127.0.0.1:8766/dsh/`. Confirm its health endpoint and the switch in both directions.
+6. If the selected release ships Antigravity, have the user sign in to the official `agy` CLI under the Windows account running the bridge. Verify the Antigravity page and model list on that host. Desktop session delivery is a separate optional integration; only follow a published setup procedure for it. If the installed release lacks the integration, report it as unavailable in that release.
+7. For remote access, use the project's documented owner-authenticated HTTPS deployment and a separate DSH relay token. Keep services bound to loopback on the Windows host. Let the user authorise the server changes and confirm the Feishu owner binding. Verify from a browser without a login that the remote APIs are protected before testing the signed-in flow.
+
+Report which components were installed, their local URLs, health check results, and anything the user still needs to do. Read-only health and model-list checks are sufficient for installation verification. Only submit a real agent turn when the user asks for a live test.
+
+## Adding model providers
+
+Configure additional model provider APIs in DeepSeek Harness. First check the native DSH model picker. Then reload the DSH bridge page. With dynamic catalog refresh support, the new model should appear in the DSH picker after the background check; older releases can require an idle bridge restart. Keep API keys in the user's local DSH configuration.

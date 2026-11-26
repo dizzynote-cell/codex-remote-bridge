@@ -113,7 +113,7 @@
   logo.closest('.brand')?.append(menu);
   logo.setAttribute('role', 'button'); logo.setAttribute('tabindex', '0');
   logo.setAttribute('aria-haspopup', 'menu'); logo.setAttribute('aria-controls', menu.id);
-  logo.setAttribute('aria-label', '切换 Codex / DeepSeek Harness');
+  logo.setAttribute('aria-label', '切换工作台');
   let providers = [
     {id: 'codex', name: 'Codex', url: local ? 'http://127.0.0.1:8765/' : '/', online: true},
     {id: 'deepseek-harness', name: 'DeepSeek Harness', url: local ? 'http://127.0.0.1:8766/dsh/' : '/dsh/', online: false}
@@ -132,7 +132,13 @@
   }
   function paint() {
     menu.replaceChildren();
-    for (const target of providers) {
+    const targets = [...providers];
+    const host = providers.find(provider => provider.id === 'deepseek-harness');
+    if (host && antigravityAvailable) {
+      targets.push({id:'antigravity', name:'Antigravity', url:new URL('antigravity.html', new URL(host.url, location.href)).href,
+        online:host.online || current === host.id});
+    }
+    for (const target of targets) {
       const button = document.createElement('button'); button.type = 'button';
       button.setAttribute('role', 'menuitem');
       const name = document.createElement('span'); name.textContent = target.name;
@@ -149,6 +155,7 @@
     event.stopImmediatePropagation();
     const native = document.querySelector('#provider-menu'); if (native) native.hidden = true;
     menu.hidden = !menu.hidden; logo.setAttribute('aria-expanded', String(!menu.hidden));
+    if (!menu.hidden && !antigravityAvailable) agIcon.src = agIconUrl;
   }, true);
   logo.addEventListener('keydown', event => {
     if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); logo.click(); }
@@ -189,5 +196,9 @@
       paint();
     } catch {}
   }
+  let antigravityAvailable = false;
+  const agIcon = new Image();
+  agIcon.onload = () => { antigravityAvailable = true; paint(); };
+  const agIconUrl = new URL('api/antigravity/icon', new URL(providers[1].url, location.href)).href;
   paint(); refresh(); setInterval(refresh, 10000);
 })();

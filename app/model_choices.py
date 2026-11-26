@@ -25,10 +25,10 @@ class ModelChoices:
         tmp.write_text(json.dumps(self.data, ensure_ascii=False), encoding="utf-8")
         os.replace(tmp, self.path)
 
-    def models(self):
+    def models(self, max_age=300):
         # Never acquire the RPC lock while holding the data lock.
         with self.lock:
-            if self.catalog and time.time() - self.checked < 300:
+            if self.catalog and time.time() - self.checked < max_age:
                 return list(self.catalog)
         catalog, cursor = [], None
         with self.rpc_lock:
@@ -55,9 +55,9 @@ class ModelChoices:
             self.defaults_checked = time.time()
             self.defaults["serviceTier"] = config.get("service_tier")
 
-    def snapshot(self, refresh=True):
+    def snapshot(self, refresh=True, max_age=300):
         if refresh:
-            self.models()
+            self.models(max_age=max_age)
             self.read_defaults()
         with self.lock:
             return {"models": list(self.catalog), "choices": dict(self.data["choices"]),

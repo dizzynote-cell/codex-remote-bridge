@@ -149,6 +149,5 @@
     label, refresh,
   };
   paint();
-  refresh();
-  setInterval(refresh, 10000);
+
 })();

@@ -12,6 +12,27 @@ def status(turn):
     value = turn.get('status')
     return value.get('type') if isinstance(value, dict) else value
 
+def collect_catalog(list_page, page_size=100, max_pages=1000):
+    """Only a successful, complete native pagination is authoritative."""
+    captured = time.time()
+    summaries, cursor, cursors = {}, None, set()
+    for _ in range(max_pages):
+        page = list_page(page_size, cursor)
+        if not isinstance(page, dict) or not isinstance(page.get('data'), list) or 'nextCursor' not in page:
+            raise ValueError('Incomplete native thread catalog')
+        for item in page['data']:
+            if not isinstance(item, dict) or not isinstance(item.get('id'), str) or not item['id']:
+                raise ValueError('Invalid native thread catalog row')
+            summaries[item['id']] = {key:item.get(key) for key in ('id','name','cwd','status','preview','updatedAt')}
+        cursor = page['nextCursor']
+        if cursor is None:
+            return summaries, {'version':1, 'complete':True, 'capturedAt':captured, 'ids':list(summaries)}
+        if not isinstance(cursor, str) or not cursor or cursor in cursors:
+            raise ValueError('Native thread catalog pagination did not complete')
+        cursors.add(cursor)
+    raise ValueError('Native thread catalog page limit exceeded')
+
+
 def run(api):
     env = api['os'].environ
     url, token = env.get('CODEX_HISTORY_URL','').strip(), env.get('CODEX_HISTORY_SYNC_TOKEN','').strip()
@@ -33,7 +54,6 @@ def run(api):
                 api['log'](f'额度读取暂时失败，继续使用缓存：{error}')
             time.sleep(300)
     threading.Thread(target=quota_worker,daemon=True).start()
-    cursor = None
 
     def send(payload):
         nonlocal https_retry_at
@@ -60,18 +80,9 @@ def run(api):
             now = time.time()
             payload = {'threads':[]}
             if now >= next_list:
-                page = api['list_threads_page'](100, None)
-                for item in page.get('data', []):
-                    summaries[item['id']] = {key:item.get(key) for key in ('id','name','cwd','status','preview','updatedAt')}
+                summaries, catalog = collect_catalog(api['list_threads_page'])
                 payload['summaries'] = list(summaries.values())
-                cursor = cursor or page.get('nextCursor')
-                if cursor:
-                    older = api['list_threads_page'](100,cursor)
-                    for item in older.get('data',[]):
-                        summary = {key:item.get(key) for key in ('id','name','cwd','status','preview','updatedAt')}
-                        summaries[item['id']] = summary
-                        payload['summaries'].append(summary)
-                    cursor = older.get('nextCursor')
+                payload['threadCatalog'] = catalog
                 if quota:
                     payload['quota'] = dict(quota)
                 next_list = now+10
@@ -79,6 +90,8 @@ def run(api):
             viewed = {r['threadId']:r for r in interests}
             candidates = []
             for tid in set(summaries) | active | set(viewed):
+                if tid not in summaries and tid not in active:
+                    continue
                 if retry_after.get(tid,0)>now:
                     continue
                 stamp = float(summaries.get(tid,{}).get('updatedAt') or 0)
@@ -100,13 +113,9 @@ def run(api):
             if candidates:
                 _, _, tid, request = min(candidates)
                 try:
-                    thread = api['read_thread'](tid)
-                    turns = thread.get('turns') or []
-                    total = len(turns)
                     limit = request.get('turnLimit','6') if request else '6'
-                    limit = total if limit=='all' else max(6,int(limit))
-                    thread['turns'] = turns[-limit:] if limit else []
-                    thread['bridgeTotalTurns'] = total
+                    thread = api['read_thread'](tid, limit)
+                    turns = thread.get('turns') or []
                     thread['updatedAt'] = summaries.get(tid,{}).get('updatedAt') or thread.get('recencyAt') or thread.get('updatedAt')
                     if request:
                         thread['bridgeRequestId'] = request['requestId']

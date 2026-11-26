@@ -84,6 +84,10 @@ def valid_thread_id(value):
 
 
 MODEL_LOCK=__import__('threading').RLock()
+MODEL_REFRESH = __import__("threading").Condition()
+model_refresh_requested = 0
+model_refresh_completed = 0
+
 def model_settings():
     row=db.execute("SELECT value FROM meta WHERE key='model_settings'").fetchone()
     return json.loads(row[0]) if row else {'models':[],'choices':{}}
@@ -249,7 +253,22 @@ class H(BaseHTTPRequestHandler):
         if p.path.startswith('/api/') and not self.authed():return self.json({'error':'feishu_login_required'},401)
         if p.path=='/api/interactions':
             with DB_LOCK:return self.json(interactions.read(db))
-        if p.path=='/api/models':return self.json(model_settings())
+        if p.path=='/api/models':
+            global model_refresh_requested
+            after = parse_qs(p.query).get('after', [''])[0]
+            with MODEL_REFRESH:
+                if after:
+                    if after.isascii() and after.isdecimal() and len(after) <= 20:
+                        requested = int(after)
+                        if 0 < requested <= model_refresh_requested:
+                            MODEL_REFRESH.wait_for(lambda: model_refresh_completed >= requested, timeout=24)
+                    request = None
+                else:
+                    if model_refresh_requested <= model_refresh_completed:
+                        model_refresh_requested = time.time_ns()
+                    request = str(model_refresh_requested)
+            settings = model_settings()
+            return self.json({**settings, 'refreshRequest':request} if request else settings)
         if p.path=='/api/preferences':
             row=db.execute("SELECT value FROM meta WHERE key='web_preferences'").fetchone()
             return self.json(json.loads(row[0]) if row else {'voiceEnabled':False,'turnCount':6,'updated':0})
@@ -307,7 +326,7 @@ class H(BaseHTTPRequestHandler):
         if p.path=='/api/threads':
             desktop_row=db.execute("SELECT value FROM meta WHERE key='desktop_project_state'").fetchone()
             desktop=json.loads(desktop_row[0]) if desktop_row else {}
-            rows=db.execute('SELECT t.id,COALESCE(o.name,t.name),t.cwd,t.status,t.preview,t.updated_at,t.synced_at,COALESCE(o.pinned,0),o.project FROM threads t LEFT JOIN thread_organizer o ON o.thread_id=t.id WHERE t.id NOT IN (SELECT thread_id FROM hidden_threads) ORDER BY CAST(t.updated_at AS REAL) DESC').fetchall()
+            rows=db.execute('SELECT t.id,COALESCE(o.name,t.name),t.cwd,t.status,t.preview,t.updated_at,t.synced_at,COALESCE(o.pinned,0),o.project FROM threads t LEFT JOIN thread_organizer o ON o.thread_id=t.id WHERE t.id NOT IN (SELECT thread_id FROM hidden_threads) AND t.id NOT IN (SELECT thread_id FROM source_retired_threads) ORDER BY CAST(t.updated_at AS REAL) DESC').fetchall()
             projects_row=db.execute("SELECT value FROM meta WHERE key='codex_projects'").fetchone();projects=json.loads(projects_row[0]) if projects_row else []
             return self.json({'threads':[{'id':r[0],'name':r[1],'cwd':r[2],'status':r[3],'preview':r[4],'updatedAt':r[5],'syncedAt':r[6],'pinned':bool(r[7]),'projectOverride':r[8],'desktopProject':desktop.get('assignments',{}).get(r[0])} for r in rows],'projects':desktop.get('projects',projects),'nextCursor':None})
         if p.path=='/api/thread-organizer':return self.json(thread_organizer.snapshot(db))
@@ -315,6 +334,8 @@ class H(BaseHTTPRequestHandler):
             rows=db.execute('SELECT t.id,t.name,t.cwd,h.hidden_at FROM hidden_threads h LEFT JOIN threads t ON t.id=h.thread_id ORDER BY h.hidden_at DESC').fetchall()
             return self.json({'threads':[{'id':r[0],'name':r[1] or '未命名对话','cwd':r[2],'hiddenAt':r[3]} for r in rows]})
         if p.path.startswith('/api/thread/'):
+            thread_id=unquote(p.path.split('/api/thread/',1)[1])
+            if history_store.retired(db,thread_id):return self.json({'error':'该对话已不在客户端当前列表中，请刷新对话列表','code':'thread_removed'},410)
             query=parse_qs(p.query)
             try:
                 with HISTORY_LOCK:
@@ -331,6 +352,7 @@ class H(BaseHTTPRequestHandler):
             active_ids=[str(x) for x in (runtime.get('activeThreadIds') or []) if valid_thread_id(x)][:20] if online else []
             active_threads=[]
             for thread_id in active_ids:
+                if history_store.retired(db,thread_id):continue
                 thread_row=db.execute('SELECT name,cwd FROM threads WHERE id=?',(thread_id,)).fetchone()
                 active_threads.append({'id':thread_id,'name':thread_row[0] if thread_row else '正在运行的对话','cwd':thread_row[1] if thread_row else ''})
             history_row=db.execute("SELECT value FROM meta WHERE key='history_sync'").fetchone();history_ts=int(history_row[0]) if history_row else 0;history_stale=bool(online and time.time()-history_ts>120)
@@ -437,7 +459,16 @@ class H(BaseHTTPRequestHandler):
             if isinstance(projects,list):
                 projects=[{'id':str(item.get('id') or '')[:100],'name':str(item.get('name') or '')[:100],'cwd':str(item.get('cwd') or '')[:500]} for item in projects if isinstance(item,dict) and item.get('cwd')][:100]
                 db.execute("INSERT INTO meta VALUES('codex_projects',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(json.dumps(projects,ensure_ascii=False),))
-            db.commit();settings=merge_model_settings(data.get('modelSettings') or {});return self.json({'ok':True,'modelChoices':settings['choices'],'preferences':current,'threadOrganizer':organizer,'threadVisibility':visibility})
+            db.commit()
+            settings = merge_model_settings(data.get('modelSettings') or {})
+            global model_refresh_completed
+            with MODEL_REFRESH:
+                if data.get('modelRefreshCompleted') == str(model_refresh_requested):
+                    model_refresh_completed = model_refresh_requested
+                    MODEL_REFRESH.notify_all()
+                requested = str(model_refresh_requested) if model_refresh_requested > model_refresh_completed else ''
+            return self.json({'ok':True,'modelChoices':settings['choices'],'preferences':current,
+                              'threadOrganizer':organizer,'threadVisibility':visibility,'modelRefreshRequest':requested})
         if p.path.startswith('/api/device/output-files/'):
             if not secrets.compare_digest(self.headers.get('Authorization') or '',f'Bearer {SYNC_TOKEN}'):return self.json({'error':'unauthorized'},401)
             file_id=unquote(p.path.split('/api/device/output-files/',1)[1]);name=unquote(self.headers.get('X-File-Name') or 'file');mime=self.headers.get('X-File-Mime') or 'application/octet-stream'
@@ -554,6 +585,7 @@ class H(BaseHTTPRequestHandler):
             data=json.loads(body or b'{}'); op=str(data.get('op') or 'message'); thread_id=str(data.get('threadId') or '').strip(); text=str(data.get('text') or '').strip(); title=str(data.get('title') or '').strip(); cwd=str(data.get('cwd') or '').strip()
             if op=='message' and (not thread_id or not text):return self.json({'error':'missing_thread_or_text'},400)
             if op=='message' and not valid_thread_id(thread_id):return self.json({'error':'invalid_thread_id','message':'所选条目不是有效的 Codex 对话，请刷新后重新选择'},400)
+            if op=='message' and history_store.retired(db,thread_id):return self.json({'error':'thread_removed','message':'该对话已不在客户端当前列表中，请刷新后选择其他对话'},410)
             if op=='new_thread' and (not title or not cwd):return self.json({'error':'missing_title_or_cwd'},400)
             model=data.get('model')
             if model and model not in {m['model'] for m in model_settings()['models']}:return self.json({'error':'模型不可用，请刷新模型列表'},400)

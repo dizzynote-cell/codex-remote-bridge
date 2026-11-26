@@ -17,6 +17,15 @@ CODEX_EXE = ROOT / "app" / "codex-app-server.exe"
 
 class CodexRpc:
     def __init__(self):
+        # The app server can spawn PowerShell itself. Give its descendants a
+        # hidden console to inherit instead of letting them allocate a visible one.
+        startupinfo = None
+        creationflags = 0
+        if hasattr(subprocess, "STARTUPINFO"):
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = subprocess.SW_HIDE
+            creationflags = subprocess.CREATE_NEW_CONSOLE
         self.process = subprocess.Popen(
             [str(CODEX_EXE), "app-server", "--stdio"],
             cwd=str(ROOT),
@@ -27,7 +36,8 @@ class CodexRpc:
             encoding="utf-8",
             errors="replace",
             bufsize=1,
-            creationflags=subprocess.CREATE_NO_WINDOW,
+            startupinfo=startupinfo,
+            creationflags=creationflags,
         )
         self._next_id = 1
         self._write_lock = threading.Lock()

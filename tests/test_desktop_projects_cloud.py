@@ -20,7 +20,10 @@ class DesktopCloudTests(Base):
         ''')
         history_store.initialize(self.db)
         self.ns.update(HISTORY_LOCK=self.ns['DB_LOCK'], history_store=history_store,
-                       unquote=unquote,
+                       unquote=unquote, MODEL_REFRESH=threading.Condition(),
+                       model_refresh_requested=0, model_refresh_completed=0,
+                       model_settings=lambda: {'models': []},
+
                        sync_visibility=lambda _: {},
                        thread_organizer=SimpleNamespace(merge=lambda *_: {}),
                        merge_model_settings=lambda _: {'choices': {}})
@@ -45,6 +48,19 @@ class DesktopCloudTests(Base):
             self.assertEqual(status, 200)
             self.assertEqual(body['thread']['desktopProject']['id'], pid)
         self.assertEqual(self.request('/api/threads')[0], 401)
+
+    def test_model_refresh_requested_once_per_reload_and_acknowledged_by_device(self):
+        device = {'Authorization': 'Bearer test-only-token'}
+        self.assertEqual(self.request('/api/models')[0], 401)
+        status, first = self.request('/api/models', headers=self.cookie)
+        self.assertEqual(status, 200)
+        generation = first['refreshRequest']
+        self.assertEqual(self.request('/api/models', headers=self.cookie)[1]['refreshRequest'], generation)
+        self.assertEqual(self.request('/api/device/heartbeat', {}, device)[1]['modelRefreshRequest'], generation)
+        ack = {'modelRefreshCompleted': generation}
+        self.assertEqual(self.request('/api/device/heartbeat', ack, device)[1]['modelRefreshRequest'], '')
+        self.assertEqual(self.request('/api/models?after=' + generation, headers=self.cookie), (200, {'models': []}))
+        self.assertNotEqual(self.request('/api/models', headers=self.cookie)[1]['refreshRequest'], generation)
 
 
 del Base

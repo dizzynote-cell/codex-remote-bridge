@@ -33,6 +33,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from lark_oapi.api.im.v1 import *
 from codex_rpc import CodexRpc
+from thread_history import read_history
 import voice_tts
 from thread_organizer import Organizer, continuation_project
 from thread_visibility import Visibility
@@ -202,16 +203,21 @@ def merge_web_preferences(remote: dict) -> None:
 def voice_text_in_completed_turn(thread_id: str, text: str) -> bool:
     if not is_valid_thread_id(thread_id):
         return False
-    thread=read_thread(thread_id)
-    for turn in thread.get("turns") or []:
-        if turn.get("status")!="completed":continue
-        for item in turn.get("items") or []:
-            if item.get("type")=="agentMessage" and item.get("phase")!="commentary" and (item.get("text") or "").strip()==text:
-                return True
-            if item.get("type")=="reasoning":
-                summary=item.get("summary") or item.get("summaries") or ""
-                parts=[part if isinstance(part,str) else str(part.get("text") or "") for part in summary] if isinstance(summary,list) else [str(summary)]
-                if "\n\n".join(parts).strip()==text:return True
+    for limit in (6, "all"):
+        thread = read_thread(thread_id, limit)
+        for turn in thread.get("turns") or []:
+            if turn.get("status") != "completed":
+                continue
+            for item in turn.get("items") or []:
+                if item.get("type") == "agentMessage" and item.get("phase") != "commentary" and (item.get("text") or "").strip() == text:
+                    return True
+                if item.get("type") == "reasoning":
+                    summary = item.get("summary") or item.get("summaries") or ""
+                    parts = [part if isinstance(part, str) else str(part.get("text") or "") for part in summary] if isinstance(summary, list) else [str(summary)]
+                    if "\n\n".join(parts).strip() == text:
+                        return True
+        if not thread.get('bridgeHasMoreTurns'):
+            break
     return False
 
 
@@ -524,14 +530,11 @@ def list_threads_page(limit: int = 50, cursor: str | None = None) -> dict:
         return codex_rpc.call("thread/list", params)
 
 
-def read_thread(thread_id: str) -> dict:
+def read_thread(thread_id: str, turn_limit=6) -> dict:
     with codex_lock:
-        result = codex_rpc.call("thread/read", {
-            "threadId": thread_id,
-            "includeTurns": True,
-        })
-        reconcile_turns(active_turns, result.get('thread', {}))
-    thread = message_times.enrich(model_choices.enrich(result.get("thread", {})))
+        native = read_history(codex_rpc.call, thread_id, turn_limit)
+        reconcile_turns(active_turns, native)
+    thread = message_times.enrich(model_choices.enrich(native))
     pending = codex_rpc.interactions.snapshot().get('requests') or []
     waiting = any(r.get('threadId') == thread_id and r.get('status') == 'pending' for r in pending)
     thread['bridgeHealth'] = codex_rpc.health.snapshot(thread, waiting=waiting)
@@ -597,7 +600,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.send_json({**codex_rpc.interactions.snapshot(), "available": not codex_rpc._closed})
                 return
             if parsed.path == "/api/models":
-                self.send_json(model_choices.snapshot())
+                try:
+                    settings = model_choices.snapshot(max_age=2)
+                except Exception:
+                    settings = model_choices.snapshot(False)
+                self.send_json(settings)
                 return
             if parsed.path == "/api/threads":
                 project_state = desktop_projects.snapshot()
@@ -687,18 +694,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             if parsed.path.startswith("/api/thread/"):
                 thread_id = parsed.path.removeprefix("/api/thread/")
-                thread = enrich_thread_attachments(read_thread(thread_id), False)
-                turns = thread.get("turns") or []
-                total = len(turns)
                 query = parse_qs(parsed.query)
                 requested = query.get("turnLimit", ["6"])[0]
                 try:
-                    limit = total if requested == "all" else max(6, min(int(requested), 300))
+                    limit = "all" if requested == "all" else max(6, min(int(requested), 300))
                 except ValueError:
                     limit = 6
-                thread["turns"] = turns[-limit:]
-                thread["bridgeTotalTurns"] = total
-                thread["bridgeVisibleTurns"] = len(thread["turns"])
+                thread = enrich_thread_attachments(read_thread(thread_id, limit), False)
                 self.send_json({"thread": thread})
                 return
             if parsed.path in {"/", "/index.html"}:
@@ -985,7 +987,7 @@ def execute_local_web_task(task_id: str, thread_id: str, text: str, files: list,
                 return
             before = read_thread(thread_id)
             previous_turn_ids = {turn.get("id") for turn in before.get("turns", [])}
-            codex_rpc.call("thread/resume", {"threadId": thread_id, "sandbox": "danger-full-access",
+            codex_rpc.call("thread/resume", {"threadId": thread_id, "excludeTurns": True, "sandbox": "danger-full-access",
                                              "approvalPolicy": "never"})
             result = model_choices.start(thread_id, codex_input, requested_model, effort=requested_effort,
                                          service_tier=requested_service_tier)
@@ -1054,17 +1056,27 @@ def cloud_base_url() -> str:
     return sync_url.split("/api/", 1)[0] if "/api/" in sync_url else sync_url
 
 
+model_refresh_event = threading.Event()
+model_refresh_requested = ""
+model_refresh_completed = ""
+
+
 def model_catalog_worker() -> None:
+    global model_refresh_completed
     while True:
+        model_refresh_event.wait()
+        model_refresh_event.clear()
+        requested = model_refresh_requested
         try:
-            model_choices.snapshot()
-        except Exception as error:
-            log(f"模型列表读取暂时失败：{error}")
-        time.sleep(15)
+            model_choices.snapshot(max_age=2)
+        except Exception:
+            log("Model catalog refresh failed; keeping the previous catalog")
+        model_refresh_completed = requested
 
 
 def cloud_heartbeat_worker() -> None:
     """Report liveness independently so slow history reads cannot look like an outage."""
+    global model_refresh_requested
     base = cloud_base_url()
     token = (os.getenv("CODEX_HISTORY_SYNC_TOKEN") or "").strip()
     if not base or not token:
@@ -1076,9 +1088,10 @@ def cloud_heartbeat_worker() -> None:
             active_thread_ids = list(dict.fromkeys(list(active_turns) +
                 (list(cloud_runtime_state.get("detected_thread_ids") or []) if detected_recently else [])))
             project_state = desktop_projects.snapshot()
+            completed = model_refresh_completed
             response = requests.post(f"{base}/api/device/heartbeat",
                 headers={"Authorization": f"Bearer {token}"},
-                json={"modelSettings": model_choices.snapshot(False), "preferences":web_preferences(),
+                json={"modelRefreshCompleted": completed, "modelSettings": model_choices.snapshot(False), "preferences":web_preferences(),
                       "threadVisibility":thread_visibility.snapshot(), "threadOrganizer":thread_organizer.snapshot(), "projects":project_state['projects'],
                       "desktopProjectState":project_state,
                       "voiceConfig":{**{key:voice_tts.settings(ROOT)[key] for key in ("voice","resource")},
@@ -1088,6 +1101,10 @@ def cloud_heartbeat_worker() -> None:
                       "historySyncAge": max(0, int(time.time() - last_sync)) if last_sync else None,
                       "historyError": cloud_runtime_state.get("last_error") or ""}, timeout=(8, 15))
             response.raise_for_status()
+            requested = response.json().get("modelRefreshRequest")
+            if requested and requested != model_refresh_requested:
+                model_refresh_requested = requested
+                model_refresh_event.set()
             model_choices.merge(response.json().get("modelChoices") or {})
             merge_web_preferences(response.json().get("preferences") or {})
             thread_organizer.merge(response.json().get("threadOrganizer") or {})
@@ -1264,7 +1281,7 @@ def execute_cloud_task(task: dict) -> None:
 
             before = read_thread(thread_id)
             previous_turn_ids = {turn.get("id") for turn in before.get("turns", [])}
-            codex_rpc.call("thread/resume", {"threadId": thread_id, "sandbox": "danger-full-access",
+            codex_rpc.call("thread/resume", {"threadId": thread_id, "excludeTurns": True, "sandbox": "danger-full-access",
                                              "approvalPolicy": "never"})
             result = model_choices.start(thread_id, codex_input, requested_model, effort=requested_effort,
                                          service_tier=requested_service_tier)
@@ -1418,12 +1435,12 @@ def selected_thread_id(chat_id: str | None = None) -> str | None:
     return bindings.get(chat_id) if chat_id and bindings.get(chat_id) else state.get("selected_thread_id")
 
 
-def current_thread(chat_id: str | None = None) -> dict | None:
+def current_thread(chat_id: str | None = None, turn_limit=6) -> dict | None:
     selected = selected_thread_id(chat_id)
     if not selected:
         return None
     try:
-        return read_thread(selected)
+        return read_thread(selected, turn_limit)
     except Exception:
         return None
 
@@ -1571,12 +1588,12 @@ def handle_command(message_id: str, chat_id: str, chat_type: str, text: str) -> 
         return True
 
     if stripped.startswith("/历史"):
-        thread = current_thread(chat_id)
+        argument = stripped[len("/历史"):].strip()
+        count = min(max(int(argument) if argument.isdigit() else 3, 1), 10)
+        thread = current_thread(chat_id, count)
         if not thread:
             reply_text(message_id, "尚未选择对话。请发送 /任务。")
             return True
-        argument = stripped[len("/历史"):].strip()
-        count = min(max(int(argument) if argument.isdigit() else 3, 1), 10)
         turns = thread.get("turns", [])[-count:]
         blocks = [f"{thread.get('name') or '当前对话'}｜最近 {len(turns)} 轮"]
         for turn in turns:
@@ -1616,6 +1633,7 @@ def send_to_codex(message_id: str, chat_id: str, text: str, codex_input: list | 
             try:
                 resumed = codex_rpc.call("thread/resume", {
                     "threadId": thread_id,
+                    "excludeTurns": True,
                     "sandbox": "danger-full-access",
                     "approvalPolicy": "never",
                 })

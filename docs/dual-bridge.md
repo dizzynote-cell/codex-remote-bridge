@@ -2,7 +2,15 @@
 
 Codex 的主机执行和同步方式不变。独立的 DeepSeek Remote Bridge 仍运行在用户自己的 Windows 电脑；云端 `/dsh/` 在所有者登录通过后提供静态页面和服务器快照；实时操作继续转发到本机。
 
-## 通道
+## 在一台 Windows 电脑上配对
+
+1. 各自安装 Codex Remote Bridge 和 [DeepSeek Remote Bridge](https://github.com/dizzynote-cell/deepseek-remote-bridge)，并在客户端完成登录。
+2. 给 DSH 桥的 `config/.env` 保留原有内容，将 `DSH_BRIDGE_HOST` 设为 `127.0.0.1`、`DSH_BRIDGE_PORT` 设为 `8766`、`DSH_BRIDGE_BASE_PATH` 设为 `/dsh/`，并将 `DSH_BRIDGE_SIBLING_URL` 指向 `http://127.0.0.1:8765/`。如已有自定义端口或反向代理，先核对路由再修改。
+3. 两桥启动后，检查 `http://127.0.0.1:8766/dsh/api/health`，再从两个页面左上角各切换一次。已有 DSH 桥如果需要重启，等当前任务结束。
+
+如果只在本机使用，到此即可。要从外网访问，再配置下面的 HTTPS 通道。
+
+## 公网通道
 
 Windows 的 DSH 桥使用独立的转发令牌，主动通过 HTTPS 连接 `/api/device/dsh-relay`，领取 HTTP 请求并回传结果。不开放家庭电脑入站端口，不上传 Harness 用户身份、模型密钥或语音供应商密钥。它不领取 Codex 的任务队列。
 

@@ -60,12 +60,12 @@ class HistoryTests(unittest.TestCase):
         def post(url,**kwargs):
             sent.append(kwargs['json'])
             return SimpleNamespace(raise_for_status=lambda:None,json=lambda:{'historyRequests':requests})
-        def read(tid):
+        def read(tid, limit=6):
             reads.append(tid)
-            return dict(self.thread,id=tid)
+            return dict(self.thread,id=tid,turns=self.thread['turns'] if limit=='all' else self.thread['turns'][-int(limit):])
         api={'os':SimpleNamespace(environ={'CODEX_HISTORY_URL':'https://example.invalid/api/sync','CODEX_HISTORY_SYNC_TOKEN':'test'}),
              'http':SimpleNamespace(post=post),'cloud_runtime_state':{},'active_turns':dict.fromkeys(active,'turn'),
-             'list_threads_page':lambda *_:{'data':[{'id':'recent','updatedAt':now},{'id':'old','updatedAt':now-8*86400}]},
+             'list_threads_page':lambda *_:{'data':[{'id':'recent','updatedAt':now},{'id':'old','updatedAt':now-8*86400}],'nextCursor':None},
              'read_thread':read,'enrich_thread_attachments':lambda t,_:t,'account_quota':lambda:{},'log':lambda _:None}
         ticks=0
         def sleep(_):

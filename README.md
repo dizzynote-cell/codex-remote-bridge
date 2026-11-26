@@ -1,18 +1,20 @@
-# Codex Remote Bridge/手机用Codex像用豆包一样方便
+# Codex Remote Bridge · 自托管 Agent 远程工作台
 
-网页端可选语音朗读：已完成的推理摘要和最终回复可按需调用火山 TTS。语音默认关闭；安装时可选填 API Key、音色 ID 和资源 ID，密钥只保存在主力电脑。已合成的语音点击即可播放，未合成的语音点击后生成。本机语音只按容量清理；公网临时缓存保留最多 72 小时，并设 5 GB 上限。
+**在手机、平板或电脑浏览器里，接着操作你自己 Windows 电脑上的 AI Agent。**
 
-**v0.2.16-beta 测试版 · 作者：[xiyannan](https://github.com/dizzynote-cell/codex-remote-bridge)**
+用一个网页入口切换 Codex、DeepSeek Harness 和 Antigravity。远程查看对话、发送消息和附件。根据 Agent 和会话来源，可以继续桌面会话、选择模型或查看额度。
 
-[查看版本更新日志](CHANGELOG.md)
+| 工作台 | 安装入口 | 会话与账户信息 |
+| --- | --- | --- |
+| Codex | 本仓库 | 接续 Codex 会话，显示 Codex 额度 |
+| DeepSeek Harness | [DeepSeek Remote Bridge v1.9.0](https://github.com/dizzynote-cell/deepseek-remote-bridge/releases/tag/v1.9.0) | 读取 DSH 会话、余额和提供商模型 |
+| Antigravity | 随 DeepSeek Remote Bridge 提供，[安装说明](https://github.com/dizzynote-cell/deepseek-remote-bridge/blob/v1.9.0/docs/antigravity.md) | CLI 会话支持续聊，桌面原会话投递按需配置；显示分项额度 |
+
+**v0.2.17-beta** · [版本更新日志](CHANGELOG.md) · [让已安装的 Agent 帮忙安装](AGENTS.md)
 
 ## 演示视频 · Video demo
 
-[下载演示视频 / Download the demo (MP4)](https://github.com/dizzynote-cell/codex-remote-bridge/releases/download/v0.2.16-beta/codex-remote-bridge-demo-zh-en.mp4) · 1:19 · 1080p · 中英双语字幕 / Chinese and English subtitles
-
-用手机或电脑浏览器接续家中 Windows 上的 Codex 对话，也可以切换到 DeepSeek Harness，选择模型和推理强度。
-
-Resume a Codex conversation on your home PC from a phone or desktop browser, then switch to DeepSeek Harness and choose a model and reasoning level.
+[下载三桥演示（MP4） / Download the demo](https://github.com/dizzynote-cell/codex-remote-bridge/releases/download/v0.2.17-beta/agent-bridge-demo-zh-en.mp4) · 36 秒 · 1080p · 中文口播 / 中英字幕
 
 ## 界面预览
 
@@ -93,7 +95,11 @@ D:\BaiduSyncdisk\Agent Disk
 
 ## 安装与启动
 
-用户只需要双击根目录的 `Codex Remote Bridge.cmd`：首次运行自动进入安装向导，配置完成后启动托盘；以后再次运行只会打开托盘并确保桥在线。真实密钥、日志、会话数据和上传文件不会提交到 Git。
+**已有能在本机执行命令的 Agent？** 在当前项目目录打开它，把下面这句话发给它：
+
+> 请先读项目根目录的 AGENTS.md，检查我的 Windows 环境，按我选择的组件安装并验证 Remote Bridge。已有配置请保留，需要登录或填写密钥时叫我操作。
+
+**手动安装**可双击根目录的 `Codex Remote Bridge.cmd`。首次运行进入 Codex 安装向导，之后可从托盘启动和打开网页。只用 Codex，到这一步就可以了。接入 DeepSeek Harness 请按[可选桥接入说明](docs/dual-bridge.md)安装独立的 DSH 桥。Antigravity 随 DSH 桥 v1.9.0 提供，需要单独安装并登录官方 CLI。
 
 ## 运行与自动恢复
 
@@ -104,9 +110,13 @@ D:\BaiduSyncdisk\Agent Disk
 
 主力电脑必须保持开机、联网，并维持 Codex 所需的网络环境。这个工具不是远程桌面，无法代替处理验证码和系统交互弹窗。
 
-## 双桥切换（可选）
+## 工作台切换（可选）
 
-左上角 LOGO 可切换 Codex / DeepSeek Harness，分别显示额度与余额，并按后端保存会话和草稿。公网 DSH 入口必须先验证所有者登录；主机通过独立的 HTTPS 出站通道连接服务器。配置与边界见 [双桥接入说明](docs/dual-bridge.md)。
+左上角 LOGO 可切换 Codex / DeepSeek Harness / Antigravity，分别显示 Codex 额度、DSH 余额和 Antigravity 分项额度，并按后端保存会话和草稿。公网 DSH 入口必须先验证所有者登录；主机通过独立的 HTTPS 出站通道连接服务器。配置与边界见 [双桥接入说明](docs/dual-bridge.md)。
+
+### 在 DSH 里接入更多模型
+
+如果你已有其他模型服务商的 API，建议先在 **DeepSeek Harness** 的模型或提供商设置里配置。确认 DSH 原生客户端能选到新模型，再重载 DSH 桥网页。支持模型目录热刷新的版本会在后台更新 **DSH 工作台**的模型选择菜单。旧版桥需要等任务结束后重启再刷新。模型密钥只放在运行 DSH 的主机上。
 
 ## 双端维护说明
 

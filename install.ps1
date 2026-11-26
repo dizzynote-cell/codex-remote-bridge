@@ -1,13 +1,36 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 xiyannan
 # Project: Codex Remote Bridge
+param(
+ [switch]$UseExistingConfig,
+ [switch]$NoStart
+)
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
 function Ask([string]$label,[string]$default='') { $suffix=if($default){" [$default]"}else{''}; $value=Read-Host "$label$suffix"; if([string]::IsNullOrWhiteSpace($value)){return $default}; return $value.Trim() }
 function Clean([string]$value) { if($value -match "[`r`n]"){throw 'Configuration values cannot contain line breaks.'}; return $value }
+function Install-CodexDependencies($python) {
+ & $python.Source -m pip install -r (Join-Path $root 'requirements.txt')
+ if($LASTEXITCODE -ne 0){throw 'Python dependency installation failed.'}
+ & (Join-Path $root 'sync-codex-runtime.ps1')
+}
+if($UseExistingConfig){
+ $configPath=Join-Path $root 'config\.env'
+ if(-not (Test-Path -LiteralPath $configPath -PathType Leaf)){throw 'Prepare config/.env before using -UseExistingConfig. See AGENTS.md.'}
+ $python=Get-Command python.exe -ErrorAction Stop
+ Install-CodexDependencies $python
+ if(-not $NoStart){& (Join-Path $root 'start-bridge.ps1') -NoBrowser}
+ return
+}
 Clear-Host
 Write-Host 'Codex Remote Bridge - Setup' -ForegroundColor Cyan
+Write-Host 'Already have a local coding agent? Ask it to read AGENTS.md and install this bridge for you.'
+Write-Host 'For manual setup, follow the six steps below. Optional companion bridges are described in docs/dual-bridge.md.'
+if(Test-Path -LiteralPath (Join-Path $root 'config\.env')){
+ Write-Host 'Existing configuration detected. Run install.ps1 -UseExistingConfig to upgrade while preserving it.'
+ return
+}
 Write-Host 'About 10-20 minutes, 6 steps:'
 Write-Host '  1. Check Windows, Python and Codex'
 Write-Host '  2. Choose Feishu-only or Feishu + Web'
@@ -46,7 +69,7 @@ if($mode -eq '2'){
  Write-Host 'Generated cloud/.env.generated. Upload securely; never commit it.' -ForegroundColor Yellow
 }
 Write-Host '[6/6] Dependencies and auto-start' -ForegroundColor Cyan
-& $python.Source -m pip install -r (Join-Path $root 'requirements.txt'); & (Join-Path $root 'sync-codex-runtime.ps1')
+Install-CodexDependencies $python
 $enableAuto=Ask 'Enable bridge auto-start after Windows sign-in? (Y/N)' 'Y'; if($enableAuto -match '^[Yy]'){& (Join-Path $root 'set-autostart.ps1') Enable}
 $installTccli=Ask 'Install Tencent Cloud CLI for optional DNS/server setup? (Y/N)' 'N'; if($installTccli -match '^[Yy]'){& $python.Source -m pip install tccli}
 $enableDesktop=Ask 'Create a desktop bridge shortcut? (Y/N)' 'Y'
@@ -59,5 +82,7 @@ if($enableDesktop -match '^[Yy]'){
  Write-Host 'Desktop shortcut created. Double-click it to start the bridge and open its page.' -ForegroundColor Green
 }
 
-Start-Process powershell.exe -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-WindowStyle','Hidden','-File',(Join-Path $root 'tray.ps1')) -WindowStyle Hidden
-Write-Host 'Setup completed. The tray icon is now running.' -ForegroundColor Green
+if(-not $NoStart){
+ Start-Process powershell.exe -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-WindowStyle','Hidden','-File',(Join-Path $root 'tray.ps1')) -WindowStyle Hidden
+}
+Write-Host 'Setup completed.' -ForegroundColor Green

@@ -38,7 +38,7 @@ async function main(){
   document.createElement=function(tag){const e=oldCreate(tag);if(tag==='section')section=e;return e;};
   vm.runInContext(fs.readFileSync(require('node:path').join(__dirname,'../web/model-picker.js'),'utf8'),context);
   await new Promise(r=>setImmediate(r));
-  const p=context.window.modelPicker;p.begin('thread-one');p.thread({id:'thread-one',turns:[]});
+  const p=context.window.modelPicker;await p.refresh();p.begin('thread-one');p.thread({id:'thread-one',turns:[]});
   const model=section.querySelector('#bridge-model'),effort=section.querySelector('#bridge-effort');
   model.value='b';await model.onchange();
   effort.value='high';await effort.onchange();

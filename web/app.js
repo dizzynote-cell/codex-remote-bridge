@@ -15,7 +15,7 @@ function projectName(cwd){return window.projectDisplay.name(cwd,managedProjects)
 function statusLabel(status){let value=status;if(typeof value==='string'&&value.trim().startsWith('{')){try{value=JSON.parse(value);}catch{}}const type=typeof value==='object'&&value?value.type:value;return({active:'当前已加载',notLoaded:'空闲',completed:'已完成',failed:'失败',interrupted:'已中断'}[type]||type||'未知');}
 function renderThreads(){return window.threadBrowser.render();}
 async function loadThreads(append=false){window.bridgeLoading?.begin();els.refresh.disabled=true;els.loadMore.disabled=true;try{const url=`/api/threads?limit=50${append&&nextCursor?`&cursor=${encodeURIComponent(nextCursor)}`:''}`,d=await(await fetch(url)).json();const incoming=d.threads||[];threads=append?[...threads,...incoming.filter(t=>!threads.some(old=>old.id===t.id))]:incoming;managedProjects=Array.isArray(d.projects)?d.projects:managedProjects;nextCursor=d.nextCursor||null;renderThreads();}finally{els.refresh.disabled=false;els.loadMore.disabled=false;window.bridgeLoading?.end();}}
-async function loadStatus(){if(window.bridgeLoading&&!window.bridgeLoading.allowed())return;try{const d=await(await fetch('/api/status')).json();els.mode.textContent=d.label;els.mode.className=`mode ${d.mode}`;}catch{els.mode.textContent='模式状态不可用';els.mode.className='mode detecting';}}
+async function loadStatus(){if(window.bridgeLoading&&!window.bridgeLoading.allowed())return;try{const d=await(await fetch('/api/status')).json();els.mode.textContent=d.mode==='mobile'?(d.historyStale?'模式：网页 · 同步延迟':'模式：网页'):d.mode==='desktop'?'模式：桌面端优先':d.label;els.mode.className=`mode ${d.mode}`;}catch{els.mode.textContent='模式状态不可用';els.mode.className='mode detecting';}}
 const quotaPercent=value=>Math.max(0,Math.min(100,Number(value)||0));
 const quotaTime=value=>value?new Date(value*1000).toLocaleString('zh-CN',{year:'numeric',month:'long',day:'numeric',weekday:'short',hour:'2-digit',minute:'2-digit'}):'未知';
 function quotaSection(label,remaining,used,reset,weekly=false){return`<section class="quota-detail-section${weekly?' weekly':''}"><div class="quota-detail-heading"><b>${label}</b><span>剩余 ${remaining}% · 已使用 ${used}%</span></div><div class="quota-detail-bar"><i style="width:${remaining}%"></i></div><div class="quota-detail-reset">刷新时间：${esc(reset)}</div></section>`;}
@@ -47,18 +47,18 @@ async function loadThread(id,silent=false,showOlder=false){
     if(data.error){window.turnHealthUI?.unavailable(id);if(!silent)els.messages.innerHTML=`<div class="loading">${esc(data.error)}</div>`;return;}
     window.modelPicker?.thread(data.thread);
     window.turnHealthUI?.show(id,data.thread?.bridgeHealth,data.thread?.bridgeSync?.syncedAt,data.thread);
-    const t=data.thread,total=Number(t.bridgeTotalTurns??(t.turns||[]).length),visible=(t.turns||[]).length;
-    const signature=JSON.stringify([total,visible,(t.turns||[]).map(turn=>[turn.id,turn.status,turn.bridgeModel,(turn.items||[]).length])]);
+    const t=data.thread,visible=(t.turns||[]).length,totalKnown=Number.isInteger(t.bridgeTotalTurns),total=totalKnown?t.bridgeTotalTurns:visible,hasOlder=t.bridgeHasMoreTurns===true||total>visible,countLabel=totalKnown?`${total} 轮`:`最近 ${visible} 轮`;
+    const signature=JSON.stringify([total,totalKnown,hasOlder,visible,(t.turns||[]).map(turn=>[turn.id,turn.status,turn.bridgeModel,(turn.items||[]).length])]);
     const summary=threads.find(item=>item.id===id);
     els.title.textContent=summary?.name||t.name||'未命名对话';
     const compactions=Number.isInteger(t.bridgeCompactionCount)&&t.bridgeCompactionCount>=0?`${t.bridgeCompactionCount} 次`:'未知';
-    els.meta.textContent=`项目：${(t.desktopProject?.name||summary?.desktopProject?.name||projectName(summary?.projectOverride||t.projectOverride||summary?.cwd||t.cwd))} · ${statusLabel(t.status)} · ${total} 轮 · 压缩 ${compactions} · ID：${t.id||id}`;
+    els.meta.textContent=`项目：${(t.desktopProject?.name||summary?.desktopProject?.name||projectName(summary?.projectOverride||t.projectOverride||summary?.cwd||t.cwd))} · ${statusLabel(t.status)} · ${countLabel} · 压缩 ${compactions} · ID：${t.id||id}`;
     if(!silent||signature!==lastThreadSignature){
       const nearBottom=els.messages.scrollHeight-els.messages.scrollTop-els.messages.clientHeight<140,remaining=Math.max(0,total-visible);
-      const older=remaining?`<div class="older-turns-wrap"><button id="load-older-turns" type="button">查看更早 6 轮（还有 ${remaining} 轮）</button><button id="load-all-turns" type="button">查看全部</button></div>`:'';
+      const older=hasOlder?`<div class="older-turns-wrap"><button id="load-older-turns" type="button">查看更早 6 轮${totalKnown?`（还有 ${remaining} 轮）`:``}</button><button id="load-all-turns" type="button">查看全部</button></div>`:'';
       els.messages.innerHTML=older+renderTurns(t.turns||[]);
       const olderButton=document.querySelector('#load-older-turns'),allButton=document.querySelector('#load-all-turns');
-      if(olderButton)olderButton.onclick=()=>{threadVisibleCounts.set(id,Math.min(total,Number(limit)+6));loadThread(id,false,true);};
+      if(olderButton)olderButton.onclick=()=>{threadVisibleCounts.set(id,totalKnown?Math.min(total,visible+6):visible+6);loadThread(id,false,true);};
       if(allButton)allButton.onclick=()=>{threadVisibleCounts.set(id,'all');loadThread(id,false,true);};
       bindAttachmentButtons();
       window.voiceUI?.bind(id);
